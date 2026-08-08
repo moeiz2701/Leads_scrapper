@@ -31,3 +31,6 @@ backend/data/
 Thumbs.db
 .idea/
 .vscode/
+
+# Spike output — raw payloads are large and regenerable
+backend/data/

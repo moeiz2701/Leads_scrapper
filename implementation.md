@@ -250,9 +250,30 @@ page.on("response", handle)   # capture /search?tbm=map & /place payloads
 
 Fall back to DOM parsing only when the payload shape changes.
 
-**Note:** the results list does *not* show phone numbers. You must open each place panel — budget one interaction per business. Realistic throughput: **200–500 businesses/hour per browser** at humane pacing.
+**Note — superseded by measurement, Aug 2026.** This section previously said the results list does not show phone numbers and you must open each place panel, budgeting one interaction per business. That is true of the **rendered DOM** but not of the **network response** this same section tells you to read. A recon spike over two live queries (40 results, Lahore salon + Lahore restaurant) found the search payload already carries the phone for every result:
 
-**Fields:** name, category, full address, lat/lng, phone, website, rating, review_count, place_id, plus_code, hours.
+| Field | Fill rate | Field | Fill rate |
+|---|---|---|---|
+| name | 40/40 (100%) | phone | **40/40 (100%)** |
+| place_id | 40/40 (100%) | rating | 40/40 (100%) |
+| address | 40/40 (100%) | category | 40/40 (100%) |
+| lat / lng | 40/40 (100%) | website | 34/40 (85%) |
+| review_count | 20/40 (50%) — see below | | |
+
+**Consequence:** Stage 2 for Maps parses ~60 search responses instead of performing ~700 detail-panel interactions. See the revised §14 timings. Detail panels drop to a *fallback* for records where the payload lacks a phone, not the default path.
+
+Reproduce with `backend/scripts/spike_maps_payload.py`; the parser and its golden-file tests are `core/maps_payload.py` and `tests/test_maps_payload.py`.
+
+Two cautions that came out of the same spike:
+
+- **Payload richness varies between responses from the same endpoint.** The lighter 194 KB response omitted `review_count` for all 20 results; the 828 KB one had it for all 20. Treat a missing field as missing, never as zero — §10.2 feeds `business_signal` from it and a fabricated 0 would push good leads *down* the ranking.
+- **The payload is positional and unversioned.** Index 178 means "phone" only by a convention Google never promised to keep. Every access must degrade to `None` rather than raise, and the field map must be pinned by a golden-file test — otherwise a reshuffle becomes the §5.5 silent-breakage scenario on the volume engine itself.
+
+Where an interaction is still needed, realistic throughput is **200–500 businesses/hour per browser** at humane pacing. Note that §14's timings assume roughly four browser workers in parallel, not one.
+
+**Fields:** name, category, full address, lat/lng, phone, website, rating, review_count, place_id, price_range. `plus_code` and `hours` were not located in the search payload — treat them as detail-panel-only.
+
+A further observation, worth an A/B test once a proxy exists: the spike ran from a **non-PK IP** and still returned correct Lahore businesses, because the query text named the area explicitly ("salon in Gulberg, Lahore"). This does not retire the §7.1 proxy requirement — ranking, completeness and result count may still differ materially — but it does suggest "returns the wrong businesses entirely" is stronger than what a location-qualified query actually does. Measure it before assuming either way.
 
 `rating` and `review_count` are your best free proxy for business size and legitimacy — feed both into lead scoring.
 
@@ -790,12 +811,15 @@ Worked example — **Lahore × salon**, core sources only:
 | Maps fan-out (12 tiles × 5 synonyms) | 60 queries | 12 min |
 | Raw results | ~2,400 | |
 | After cross-query dedupe | ~700 unique | 3 min |
-| Maps detail panels (1 interaction each) | 700 | 28 min |
+| Maps payload parse (phones included — §5.1) | 60 responses | ~0 min |
+| Maps detail panels (fallback only, ~5% of records) | ~35 | 2 min |
 | Website enrichment (~30% have sites) | 210 domains | 8 min |
 | Directory corroboration | ~120 matches | 4 min |
 | Normalise, attribute, score, dedupe | — | 2 min |
 | **With a phone** | **~600** | |
-| **Qualified (score ≥ 60 + mobile)** | **~380** | **~57 min** |
+| **Qualified (score ≥ 60 + mobile)** | **~380** | **~31 min** |
+
+> **Revised Aug 2026.** This table previously budgeted 700 detail-panel interactions at 28 minutes, giving ~57 min per run. The recon spike (§5.1) found phones are already in the search payload at 100% fill, so panels are now a fallback for the residual records rather than the main path. The old 28-minute figure also silently assumed ~4 parallel browser workers to reconcile with §5.1's stated 200–500 businesses/hour *per browser*; on a single worker it would have been closer to two hours.
 
 Comfortably inside the "few hundred good-quality leads" target for broad categories in tier-1 cities.
 
