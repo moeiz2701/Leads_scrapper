@@ -41,12 +41,17 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 # Google prefixes its JSON payloads with an anti-hijacking guard.
 _JSON_GUARD_RE = re.compile(r"^\)\]\}'\s*")
 _REVIEW_COUNT_RE = re.compile(r"([\d,]+)\s+review", re.IGNORECASE)
+# Chunked responses separate documents with a /*""*/ trailer.
+_SKIP_RE = re.compile(r"(?:\s|/\*.*?\*/)*", re.DOTALL)
+
+MAX_UNWRAP_DEPTH = 4
 
 # Index of the results array within the top-level payload.
 RESULTS_INDEX = 64
@@ -95,13 +100,54 @@ def strip_guard(text: str) -> str:
     return _JSON_GUARD_RE.sub("", text).strip()
 
 
-def parse_payload(raw: bytes | str) -> Any | None:
-    """Decode a captured response body, or ``None`` if it is not the JSON payload."""
+def iter_payloads(raw: bytes | str, _depth: int = 0) -> Iterator[Any]:
+    """Yield every Maps payload document inside one response body.
+
+    Maps serves the *first* page of results as a bare guarded array, but the
+    lazy-loaded pages that arrive as you scroll come wrapped differently: one or
+    more concatenated JSON envelopes of the form
+
+        {"c":0,"d":")]}'\\n[[...the real array...]", ...}/*""*/
+
+    with the payload JSON-encoded inside ``d`` and a comment trailer between
+    documents. A plain ``json.loads`` raises "Extra data" on that, which an
+    earlier version of this parser swallowed — so four out of every five
+    captured payloads silently produced zero results while the run reported
+    success. That is precisely the §5.5 failure mode, and it was costing roughly
+    two thirds of the available results per query.
+
+    The inner array has the identical shape once unwrapped, so the field map
+    below applies unchanged.
+    """
+    if _depth > MAX_UNWRAP_DEPTH:
+        return
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-    try:
-        return json.loads(strip_guard(text))
-    except json.JSONDecodeError:
-        return None
+    text = strip_guard(text)
+
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        skip = _SKIP_RE.match(text, index)
+        if skip:
+            index = skip.end()
+        if index >= len(text):
+            return
+        try:
+            document, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return
+
+        if isinstance(document, dict):
+            inner = document.get("d")
+            if isinstance(inner, str):
+                yield from iter_payloads(inner, _depth + 1)
+                continue
+        yield document
+
+
+def parse_payload(raw: bytes | str) -> Any | None:
+    """The first payload document in a body, or ``None`` if there is none."""
+    return next(iter_payloads(raw), None)
 
 
 def _get(node: Any, path: tuple[int | str, ...]) -> Any:
@@ -153,18 +199,26 @@ def parse_result(record: Any) -> MapsResult | None:
 
 
 def parse_search_results(raw: bytes | str) -> list[MapsResult]:
-    """Every business in one captured Maps search response."""
-    payload = parse_payload(raw)
-    if payload is None:
-        return []
-    wrappers = _get(payload, (RESULTS_INDEX,))
-    if not isinstance(wrappers, list):
-        return []
+    """Every business in one captured Maps search response.
 
+    Walks all documents in the body, since a chunked response can carry several.
+    Deduplicated on ``place_id`` so overlapping documents do not inflate counts.
+    """
     results: list[MapsResult] = []
-    for wrapper in wrappers:
-        result = parse_result(_get(wrapper, (1,)))
-        if result is not None:
+    seen: set[str] = set()
+
+    for payload in iter_payloads(raw):
+        wrappers = _get(payload, (RESULTS_INDEX,))
+        if not isinstance(wrappers, list):
+            continue
+        for wrapper in wrappers:
+            result = parse_result(_get(wrapper, (1,)))
+            if result is None:
+                continue
+            key = result.place_id or f"{result.name}|{result.address}"
+            if key in seen:
+                continue
+            seen.add(key)
             results.append(result)
     return results
 

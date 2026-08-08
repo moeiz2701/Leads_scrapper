@@ -140,6 +140,47 @@ def get_synonyms(category: Category | str, limit: int | None = None) -> tuple[st
     return synonyms[:limit] if limit else synonyms
 
 
+@dataclass(frozen=True, slots=True)
+class QuerySpec:
+    """One Maps query plus the provenance needed to attribute its results.
+
+    The tile is not decoration: it becomes ``businesses.area`` (§12.1 column 5),
+    and it is the only place that value can come from — a Maps result's address
+    does not reliably name the commercial district.
+    """
+
+    query: str
+    tile: str
+    synonym: str
+    city: str
+
+
+def build_query_plan(
+    city: str,
+    category: Category | str,
+    synonym_limit: int | None = None,
+    tile_limit: int | None = None,
+) -> list[QuerySpec]:
+    """The §5.1 fan-out with tile/synonym provenance attached.
+
+    The limits exist for smoke runs and for the §13 "estimated available"
+    preview — a full plan is 12 tiles × N synonyms and takes tens of minutes.
+    """
+    city_cfg = get_city(city)
+    synonyms = get_synonyms(category, synonym_limit)
+    tiles = city_cfg.tiles[:tile_limit] if tile_limit else city_cfg.tiles
+    return [
+        QuerySpec(
+            query=f"{synonym} in {tile}, {city_cfg.name}",
+            tile=tile,
+            synonym=synonym,
+            city=city_cfg.name,
+        )
+        for tile in tiles
+        for synonym in synonyms
+    ]
+
+
 def build_queries(
     city: str, category: Category | str, synonym_limit: int | None = None
 ) -> list[str]:

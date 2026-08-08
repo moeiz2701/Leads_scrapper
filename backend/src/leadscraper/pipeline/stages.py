@@ -49,12 +49,17 @@ class StageResult:
         return data
 
 
-def stage_discovery(run_id: uuid.UUID) -> StageResult:
-    """Stage 1 — Maps grid fan-out, vertical and horizontal directories.
+def stage_discovery(run_id: uuid.UUID, synonym_limit: int | None = None) -> StageResult:
+    """Stage 1 — Maps grid fan-out (§5.1).
 
-    Emits: name, address, lat/lng, website, maps_place_id.
+    Emits businesses *and* their listed phone numbers: per the §5.1 recon, the
+    Maps search payload already carries the phone, so this stage does the work
+    §14 originally costed as 700 separate detail-panel interactions. Directory
+    and vertical discovery join here in Phases 6–7.
     """
-    raise StageNotImplementedError(Stage.DISCOVERY, "Phase 2 (Google Maps) / Phase 6–7")
+    from leadscraper.services.discovery import run_maps_discovery
+
+    return run_maps_discovery(run_id, synonym_limit=synonym_limit)
 
 
 def stage_contact_enrichment(run_id: uuid.UUID) -> StageResult:
@@ -102,7 +107,7 @@ STAGE_FUNCTIONS = {
 # the API reads it to refuse a run with a clear message rather than enqueuing
 # work that can only fail. Deliberately a declared list, not something probed by
 # calling the functions — probing a stage means running it.
-IMPLEMENTED_STAGES: frozenset[Stage] = frozenset()
+IMPLEMENTED_STAGES: frozenset[Stage] = frozenset({Stage.DISCOVERY})
 
 
 def implemented_stages() -> list[Stage]:

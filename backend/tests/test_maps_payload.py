@@ -14,6 +14,7 @@ diff the indices, and update FIELD_PATHS — do not delete the test.
 from __future__ import annotations
 
 import gzip
+import json
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,42 @@ def test_website_may_be_a_social_profile(salon_results) -> None:
 # --------------------------------------------------------------------------- #
 # Defensive parsing — the payload is positional and unversioned
 # --------------------------------------------------------------------------- #
+
+
+def test_paginated_envelope_format_parses() -> None:
+    """The lazy-loaded pages Maps sends as you scroll are wrapped differently
+    from the first page: ``{"c":0,"d":")]}'\\n[...]"}/*""*/``, with the payload
+    JSON-encoded inside ``d`` and a comment trailer.
+
+    A plain json.loads raises "Extra data" on that, which the parser used to
+    swallow — so four of every five captured payloads silently produced zero
+    results while the run reported success. Measured cost: 20 unique businesses
+    per query instead of 56, from responses already fetched and paid for.
+    """
+    results = parse_search_results(_load("maps_search_paginated.json.gz"))
+    assert len(results) == 4
+    assert all(r.phone_raw for r in results)
+    assert all(r.place_id for r in results)
+
+
+def test_envelope_and_bare_payloads_use_the_same_field_map() -> None:
+    """Once unwrapped the inner array has the identical shape, so a single field
+    map serves both. If that ever stops being true, this fails."""
+    paginated = parse_search_results(_load("maps_search_paginated.json.gz"))
+    bare = parse_search_results(_load("maps_search_salon.json.gz"))
+    for results in (paginated, bare):
+        assert all(r.name and r.place_id and r.lat is not None for r in results)
+
+
+def test_multiple_documents_in_one_body_are_all_read() -> None:
+    doc = ")]}'\n" + json.dumps([None] * 65)
+    assert parse_search_results(doc + '/*""*/' + doc) == []
+
+
+def test_unwrapping_is_depth_bounded() -> None:
+    """A malformed envelope that nests into itself must not recurse forever."""
+    nested = json.dumps({"d": json.dumps({"d": json.dumps({"d": "[]"})})})
+    assert parse_search_results(nested) == []
 
 
 def test_json_guard_is_stripped() -> None:

@@ -1,36 +1,67 @@
 """Shared fixtures.
 
-DB-backed tests run against the Compose Postgres and are skipped (not failed)
-when it is not up, so the pure-logic suite — which is most of it — stays runnable
-with nothing but `uv sync`.
+DB-backed tests run against a **separate** ``*_test`` database, created on
+demand. That separation is not fastidiousness: real runs commit into the main
+database, and tests that query globally (``select(Contact)``) would otherwise
+see production rows and fail — or worse, pass for the wrong reason.
+
+Tests are skipped, not failed, when Postgres is unreachable, so the pure-logic
+suite stays runnable with nothing but ``uv sync``.
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from leadscraper.config import get_settings
 from leadscraper.core.cache import DiskArchive, FetchCache
-from leadscraper.db.session import get_engine
+from leadscraper.db import models  # noqa: F401  — registers tables on Base.metadata
+from leadscraper.db.base import Base
+
+TEST_DB_SUFFIX = "_test"
 
 
-def _database_reachable() -> bool:
+def _test_database_url() -> str:
+    settings = get_settings()
+    return settings.database_url.rsplit("/", 1)[0] + f"/{settings.postgres_db}{TEST_DB_SUFFIX}"
+
+
+@functools.lru_cache(maxsize=1)
+def _test_engine() -> Engine | None:
+    """Create the test database and schema, or ``None`` if Postgres is down."""
+    settings = get_settings()
+    admin_url = settings.database_url.rsplit("/", 1)[0] + "/postgres"
+    db_name = f"{settings.postgres_db}{TEST_DB_SUFFIX}"
+
     try:
-        with get_engine().connect() as conn:
-            conn.execute(text("select 1"))
-        return True
+        admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+        with admin.connect() as conn:
+            exists = conn.execute(
+                text("select 1 from pg_database where datname = :n"), {"n": db_name}
+            ).scalar()
+            if not exists:
+                conn.execute(text(f'create database "{db_name}"'))
+        admin.dispose()
     except SQLAlchemyError:
-        return False
+        return None
+
+    engine = create_engine(_test_database_url(), future=True)
+    try:
+        Base.metadata.create_all(engine)
+    except SQLAlchemyError:
+        return None
+    return engine
 
 
 requires_db = pytest.mark.skipif(
-    not _database_reachable(),
+    _test_engine() is None,
     reason="Postgres not reachable — run `docker compose up -d` from the repo root",
 )
 
@@ -39,10 +70,12 @@ requires_db = pytest.mark.skipif(
 def db_session() -> Iterator[Session]:
     """A session inside a transaction that is always rolled back.
 
-    Tests share one database and never leave rows behind, so they can run in any
-    order and repeatedly without a reset step.
+    Tests therefore leave no rows behind and can run in any order, repeatedly,
+    without a reset step.
     """
-    connection = get_engine().connect()
+    engine = _test_engine()
+    assert engine is not None
+    connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, expire_on_commit=False)
     try:

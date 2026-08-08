@@ -250,17 +250,37 @@ page.on("response", handle)   # capture /search?tbm=map & /place payloads
 
 Fall back to DOM parsing only when the payload shape changes.
 
-**Note — superseded by measurement, Aug 2026.** This section previously said the results list does not show phone numbers and you must open each place panel, budgeting one interaction per business. That is true of the **rendered DOM** but not of the **network response** this same section tells you to read. A recon spike over two live queries (40 results, Lahore salon + Lahore restaurant) found the search payload already carries the phone for every result:
+**Note — superseded by measurement, Aug 2026.** This section previously said the results list does not show phone numbers and you must open each place panel, budgeting one interaction per business. That is true of the **rendered DOM** but not of the **network response** this same section tells you to read. The search payload already carries the phone.
+
+Measured over 3 live queries (Islamabad × salon, 249 raw results):
 
 | Field | Fill rate | Field | Fill rate |
 |---|---|---|---|
-| name | 40/40 (100%) | phone | **40/40 (100%)** |
-| place_id | 40/40 (100%) | rating | 40/40 (100%) |
-| address | 40/40 (100%) | category | 40/40 (100%) |
-| lat / lng | 40/40 (100%) | website | 34/40 (85%) |
-| review_count | 20/40 (50%) — see below | | |
+| name / place_id | 100% | **phone** | **87%** |
+| address | 100% | rating | 100% |
+| lat / lng | 100% | category | 100% |
+| review_count | varies — see below | website | ~85% |
 
-**Consequence:** Stage 2 for Maps parses ~60 search responses instead of performing ~700 detail-panel interactions. See the revised §14 timings. Detail panels drop to a *fallback* for records where the payload lacks a phone, not the default path.
+> **Correction.** An earlier revision of this note claimed phone fill of 100%, measured over 40 results. That sample was the *first page only*. Across paginated results the true rate is **87%** — which lands almost exactly on this section's original "~85% have a listed phone". The 100% figure was an artefact of a small first-page sample, not a better source.
+
+**Consequence:** Stage 2 for Maps parses search responses instead of performing ~700 detail-panel interactions. See the revised §14 timings. Detail panels drop to a *fallback* for the ~13% of records where the payload lacks a phone, not the default path.
+
+**Two payload formats, and the trap between them.** The first page of results arrives as a bare guarded array. The pages that lazy-load as you scroll arrive **wrapped**:
+
+```
+{"c":0,"d":")]}'\n[[ ...the real array... ]", ...}/*""*/
+```
+
+— the payload JSON-encoded inside `d`, with a comment trailer, sometimes several documents concatenated in one body. A plain `json.loads` raises `Extra data` on that. If the parser swallows the error, four out of every five captured payloads silently yield zero results while the run reports success — the §5.5 failure mode, on the volume engine. Once unwrapped the inner array has the identical shape, so one field map serves both.
+
+**Scroll to exhaustion, and measure progress by feed height, not payload arrival.** Maps lazy-loads ~20 results at a time toward its ~120-per-query cap. Pagination responses fire only every ~3 scrolls while the feed grows on every one, so an idle-check keyed on payload arrival stops after two scrolls. Combined effect of getting both of these right, on the same 3 queries:
+
+| | Results/query | Unique businesses |
+|---|---|---|
+| One scroll, envelope unhandled | 20 | 60 |
+| Scroll to exhaustion + envelope parsed | 54–99 | **199** |
+
+That is a **3.3× volume increase for the same number of navigations** — by a wide margin the cheapest volume in the system, since the page is already loaded and paid for.
 
 Reproduce with `backend/scripts/spike_maps_payload.py`; the parser and its golden-file tests are `core/maps_payload.py` and `tests/test_maps_payload.py`.
 
@@ -819,7 +839,12 @@ Worked example — **Lahore × salon**, core sources only:
 | **With a phone** | **~600** | |
 | **Qualified (score ≥ 60 + mobile)** | **~380** | **~31 min** |
 
-> **Revised Aug 2026.** This table previously budgeted 700 detail-panel interactions at 28 minutes, giving ~57 min per run. The recon spike (§5.1) found phones are already in the search payload at 100% fill, so panels are now a fallback for the residual records rather than the main path. The old 28-minute figure also silently assumed ~4 parallel browser workers to reconcile with §5.1's stated 200–500 businesses/hour *per browser*; on a single worker it would have been closer to two hours.
+> **Revised Aug 2026.** This table previously budgeted 700 detail-panel interactions at 28 minutes, giving ~57 min per run. Phones are already in the search payload (§5.1), so panels are now a fallback for the ~13% of records without one rather than the main path. The old 28-minute figure also silently assumed ~4 parallel browser workers to reconcile with §5.1's stated 200–500 businesses/hour *per browser*; on a single worker it would have been closer to two hours.
+
+**Measured yield, and what it means for the plan.** 3 queries (Islamabad × salon, 1 synonym, 3 tiles) produced **199 unique businesses, 174 with a phone**. At that rate the §5.1 full fan-out of 60 queries overshoots the 300–800 target by a wide margin — the practical constraint becomes runtime and politeness, not availability. Two consequences worth acting on:
+
+- **Tune the plan down, not up.** For a broad category in a tier-1 city, 3–4 synonyms × 6–8 tiles is likely enough to clear the target. Spending 60 queries to collect 3,000 businesses you will not contact is a worse trade than spending 20 and finishing in a third of the time.
+- **The §4.2 synonym list has heavy internal overlap.** Measured on Lahore × salon, 8 queries over 4 near-synonyms (`salon`, `saloon`, `beauty parlour`, `beauty parlor`) returned 160 raw for 52 unique — a 67% duplicate rate. Near-duplicate spellings earn their place only in thin markets. Rank synonyms by *marginal* unique yield after the §16 validation run and cut the tail.
 
 Comfortably inside the "few hundred good-quality leads" target for broad categories in tier-1 cities.
 

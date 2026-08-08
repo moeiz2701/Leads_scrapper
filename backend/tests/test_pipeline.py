@@ -25,7 +25,7 @@ def test_every_stage_has_a_timeout() -> None:
     assert set(STAGE_TIMEOUTS) == set(Stage)
 
 
-@pytest.mark.parametrize("stage", list(Stage))
+@pytest.mark.parametrize("stage", missing_stages())
 def test_unimplemented_stages_raise_rather_than_return_empty(stage: Stage) -> None:
     """A stage that silently produces zero rows is the §5.5 failure mode —
     you harvest nothing and do not notice. Until a stage has a body, it must
@@ -37,7 +37,15 @@ def test_unimplemented_stages_raise_rather_than_return_empty(stage: Stage) -> No
 
 
 def test_stage_registry_is_declared_not_probed() -> None:
-    """Phase 1 ships no stage bodies. This flips as each phase lands, and it
-    must be a declaration — probing by calling the function means running it."""
-    assert implemented_stages() == []
-    assert missing_stages() == list(Stage)
+    """The registry is a declaration that flips as each phase lands — probing it
+    by calling the stage functions would mean running them."""
+    assert implemented_stages() == [Stage.DISCOVERY]
+    assert Stage.DISCOVERY not in missing_stages()
+    assert set(implemented_stages()) | set(missing_stages()) == set(Stage)
+
+
+def test_a_missing_run_fails_loudly(  ) -> None:
+    """An implemented stage handed a nonexistent run must raise, not return a
+    zero-count StageResult that reads like a successful empty run."""
+    with pytest.raises(ValueError, match="No such run"):
+        STAGE_FUNCTIONS[Stage.DISCOVERY](uuid.uuid4())
