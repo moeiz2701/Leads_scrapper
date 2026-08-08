@@ -1,0 +1,92 @@
+# §3.1 cities, each with the §5.1 commercial tiles that make volume achievable.
+#
+# A tile is a commercial district you run the full synonym set against. Tiling
+# is what gets you past the ~120-result cap on a single Maps query:
+#   12 tiles x 5 synonyms = 60 queries -> ~2,400 raw -> ~700 unique
+#
+# Only Lahore's tiles are given in implementation.md (§5.1). The rest are a
+# starting set drawn from each city's main commercial areas — treat them as a
+# hypothesis to tune, not ground truth. After a validation run, drop tiles that
+# returned nothing and split any tile that hit the result cap.
+
+Lahore:
+  tier: 1
+  area_code: "042"
+  tiles: [DHA, Gulberg, Johar Town, Model Town, Bahria Town, Faisal Town,
+          Garden Town, Iqbal Town, Township, Cantt, Wapda Town, Valencia]
+
+Karachi:
+  tier: 1
+  area_code: "021"
+  tiles: [Clifton, DHA, Gulshan-e-Iqbal, North Nazimabad, Saddar, Tariq Road,
+          Bahadurabad, Gulistan-e-Johar, PECHS, Nazimabad, Malir, Korangi]
+
+Islamabad:
+  tier: 1
+  area_code: "051"
+  tiles: [F-6, F-7, F-8, F-10, F-11, G-9, G-11, I-8, Blue Area,
+          DHA Islamabad, Bahria Town]
+
+Rawalpindi:
+  tier: 1
+  area_code: "051"
+  tiles: [Saddar, Committee Chowk, Satellite Town, Bahria Town, Chaklala,
+          Raja Bazaar, Adiala Road]
+
+Faisalabad:
+  tier: 2
+  area_code: "041"
+  tiles: [Peoples Colony, D Ground, Madina Town, Susan Road, Civil Lines,
+          Jaranwala Road, Satiana Road]
+
+Multan:
+  tier: 2
+  area_code: "061"
+  tiles: [Cantt, Gulgasht Colony, Bosan Road, Shah Rukn-e-Alam, Model Town,
+          Chowk Kumharanwala]
+
+Peshawar:
+  tier: 2
+  area_code: "091"
+  tiles: [University Road, Hayatabad, Saddar, Board Bazaar, Ring Road, Cantt]
+
+Gujranwala:
+  tier: 2
+  area_code: "055"
+  tiles: [Model Town, Satellite Town, DC Colony, Peoples Colony, GT Road,
+          Wapda Town]
+
+Sialkot:
+  tier: 2
+  area_code: "052"
+  tiles: [Cantt, Paris Road, Kashmir Road, Model Town, Defence Road]
+
+Hyderabad:
+  tier: 2
+  area_code: "022"
+  tiles: [Latifabad, Qasimabad, Saddar, Auto Bhan Road]
+
+Quetta:
+  tier: 2
+  area_code: "081"
+  tiles: [Jinnah Road, Cantt, Satellite Town, Samungli Road]
+
+Bahawalpur:
+  tier: 3
+  area_code: "062"
+  tiles: [Model Town A, Satellite Town, Cantt, Circular Road]
+
+Sargodha:
+  tier: 3
+  area_code: "048"
+  tiles: [Satellite Town, Civil Lines, University Road]
+
+Gujrat:
+  tier: 3
+  area_code: "053"
+  tiles: [GT Road, Kutchery Chowk, Small Industrial Estate]
+
+Abbottabad:
+  tier: 3
+  area_code: "0992"
+  tiles: [Mansehra Road, Supply Bazaar, Cantt, Jinnah Road]

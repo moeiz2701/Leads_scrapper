@@ -1,0 +1,103 @@
+# §4.2 Query expansion dictionary — the highest-leverage config file here.
+#
+# Google Maps caps a single query at ~120 results, so volume comes from synonym
+# fan-out. In Pakistan that means local and transliterated terms, not just the
+# English ones: "hajaam" and "darzi" surface listings that "barber" and "tailor"
+# never reach.
+#
+# queries_per_run = len(commercial_tiles) x len(synonyms[category])
+# Adding a synonym multiplies your query count by tiles — measure yield per
+# synonym after the first validation run (§16) and drop the dead ones.
+
+food:
+  - restaurant
+  - cafe
+  - coffee shop
+  - bakery
+  - karahi
+  - bbq
+  - tikka shop
+  - nihari
+  - biryani
+  - fast food
+  - burger
+  - pizza
+  - broast
+  - sweets
+  - mithai
+  - halwa puri
+  - dhaba
+
+fashion:
+  - boutique
+  - clothing store
+  - garments
+  - ladies tailor
+  - darzi
+  - stitching
+  - unstitched
+  - pret
+  - lawn
+  - kids wear
+  - shoe store
+  - fabric shop
+  - cloth house
+
+ecommerce:
+  - mobile shop
+  - electronics store
+  - computer shop
+  - home appliances
+  - AC shop
+  - LED shop
+  - auto parts
+  - spare parts
+  - sports shop
+
+real_estate:
+  - property dealer
+  - estate agency
+  - real estate
+  - builders
+  - developers
+  - marketing
+  - consultant
+
+salon:
+  - salon
+  - saloon
+  - beauty parlour
+  - beauty parlor
+  - hair salon
+  - barber
+  - hajaam
+  - men's salon
+  - ladies salon
+  - spa
+  - massage centre
+  - bridal studio
+
+car_services:
+  - car workshop
+  - auto workshop
+  - mechanic
+  - denting painting
+  - car detailing
+  - car tuning
+  - car AC
+  - wheel alignment
+  - service station
+  - car wash
+
+entertainment:
+  - snooker club
+  - pool club
+  - gaming zone
+  - indoor play area
+  - kids play area
+  - trampoline park
+  - padel
+  - futsal
+  - indoor cricket
+  - arcade
+  - PS5 lounge

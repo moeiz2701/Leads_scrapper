@@ -1,0 +1,168 @@
+"""Cities, commercial tiles, synonyms and source routing (§3.1, §4, §4.2, §5.1).
+
+Loads the YAML config files and answers the two questions the discovery stage
+asks: "which queries do I run?" and "which source modules apply?".
+"""
+
+from __future__ import annotations
+
+import functools
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+
+from leadscraper.config import BACKEND_ROOT
+from leadscraper.enums import Category, Source
+
+CONFIG_DIR = BACKEND_ROOT / "config"
+
+
+@dataclass(frozen=True, slots=True)
+class City:
+    name: str
+    tier: int
+    area_code: str
+    tiles: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRoute:
+    """§4 — which vertical sources exist for a category, and how good they are.
+
+    The critical finding of §4 is that only three of the seven categories have a
+    real vertical directory. ``strength`` keeps that honest instead of pretending
+    every category has one: for ``none``, Maps carries the entire run.
+    """
+
+    vertical: tuple[Source, ...]
+    strength: str  # strong | weak | none
+    volume_driver: tuple[Source, ...]
+
+
+# §4 category → source routing table, verbatim from the doc.
+SOURCE_ROUTES: dict[Category, SourceRoute] = {
+    Category.FOOD: SourceRoute(
+        vertical=(Source.FOODPANDA,),
+        strength="strong",
+        volume_driver=(Source.GOOGLE_MAPS, Source.FOODPANDA),
+    ),
+    Category.REAL_ESTATE: SourceRoute(
+        vertical=(Source.ZAMEEN,),
+        strength="strong",
+        volume_driver=(Source.ZAMEEN,),
+    ),
+    Category.ENTERTAINMENT: SourceRoute(
+        vertical=(Source.PAKPLAY, Source.TURFY),
+        strength="strong",
+        volume_driver=(Source.PAKPLAY, Source.GOOGLE_MAPS),
+    ),
+    Category.SALON: SourceRoute(
+        vertical=(),
+        strength="none",
+        volume_driver=(Source.GOOGLE_MAPS,),
+    ),
+    Category.CAR_SERVICES: SourceRoute(
+        vertical=(),
+        strength="weak",
+        volume_driver=(Source.GOOGLE_MAPS,),
+    ),
+    Category.FASHION: SourceRoute(
+        vertical=(),
+        strength="none",
+        volume_driver=(Source.GOOGLE_MAPS, Source.FACEBOOK, Source.INSTAGRAM),
+    ),
+    Category.ECOMMERCE: SourceRoute(
+        vertical=(),
+        strength="none",
+        volume_driver=(Source.GOOGLE_MAPS, Source.FACEBOOK, Source.INSTAGRAM),
+    ),
+}
+
+# §4.1 — recorded in code so a future contributor cannot quietly add a module for
+# one of these without first reading why it was rejected.
+EXCLUDED_SOURCES: dict[str, str] = {
+    "linkedin": (
+        "Near-zero phone data, aggressively anti-bot, actively litigates. Its only "
+        "value is owner-name enrichment. Use the SECP register or the business's "
+        "own About page instead."
+    ),
+    "tiktok": "Heavy JS, aggressive fingerprinting, negligible phone yield.",
+    "khelpoint": "/venues serves 8 placeholder listings on stock imagery. Marketing site.",
+    "cheetay": "Shut down completely, Jan 2024.",
+    "apollo": "US/EU corporate data. Effectively no coverage of Pakistani SMBs.",
+    "zoominfo": "US/EU corporate data. Effectively no coverage of Pakistani SMBs.",
+    "hunter_io": "US/EU corporate data. Effectively no coverage of Pakistani SMBs.",
+    "lusha": "US/EU corporate data. Effectively no coverage of Pakistani SMBs.",
+    "daraz": "Marketplaces do not expose seller phone numbers.",
+    "priceoye": "Marketplaces do not expose seller phone numbers.",
+    "google_places_api": (
+        "Deliberately unused: per-request pricing and quotas would cap the grid "
+        "fan-out that makes the volume target reachable (§7.1)."
+    ),
+}
+
+
+def _load_yaml(name: str) -> dict:
+    path = Path(CONFIG_DIR) / name
+    with path.open(encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+@functools.lru_cache(maxsize=1)
+def load_cities() -> dict[str, City]:
+    return {
+        name: City(
+            name=name,
+            tier=int(data.get("tier", 3)),
+            area_code=str(data.get("area_code", "")),
+            tiles=tuple(data.get("tiles", [])),
+        )
+        for name, data in _load_yaml("cities.yaml").items()
+    }
+
+
+@functools.lru_cache(maxsize=1)
+def load_synonyms() -> dict[str, tuple[str, ...]]:
+    return {k: tuple(v) for k, v in _load_yaml("synonyms.yaml").items()}
+
+
+def get_city(name: str) -> City:
+    cities = load_cities()
+    if name not in cities:
+        raise KeyError(f"Unknown city {name!r}. Known: {', '.join(sorted(cities))}")
+    return cities[name]
+
+
+def get_synonyms(category: Category | str, limit: int | None = None) -> tuple[str, ...]:
+    key = category.value if isinstance(category, Category) else category
+    synonyms = load_synonyms().get(key, ())
+    return synonyms[:limit] if limit else synonyms
+
+
+def build_queries(
+    city: str, category: Category | str, synonym_limit: int | None = None
+) -> list[str]:
+    """The §5.1 grid × synonym fan-out, as literal Maps search strings.
+
+    ``12 tiles × 5 synonyms = 60 queries`` — this function is where that number
+    comes from, so the run estimator and the discovery stage cannot disagree.
+    """
+    city_cfg = get_city(city)
+    synonyms = get_synonyms(category, synonym_limit)
+    return [
+        f"{synonym} in {tile}, {city_cfg.name}"
+        for tile in city_cfg.tiles
+        for synonym in synonyms
+    ]
+
+
+def estimate_query_count(
+    city: str, category: Category | str, synonym_limit: int | None = None
+) -> int:
+    return len(get_city(city).tiles) * len(get_synonyms(category, synonym_limit))
+
+
+def route_for(category: Category | str) -> SourceRoute:
+    key = Category(category) if isinstance(category, str) else category
+    return SOURCE_ROUTES[key]
