@@ -11,16 +11,45 @@ ignoring it.
 
 ## Status
 
-Phase 1 of the §16 build order is complete. Phases 2–10 are outstanding.
+Phases 1–3 of the §16 build order are complete. Phases 4–10 are outstanding.
 
 | | |
 |---|---|
-| ✅ Done | Schema + migrations, queue skeleton, raw-fetch cache, phone normaliser + PK classifier, WhatsApp evidence scorer, proxy abstraction, taxonomy/synonym config |
-| ⬜ Next | Maps recon spike, then Phase 2 (Google Maps module) |
+| ✅ Phase 1 | Schema + migrations, queue skeleton, raw-fetch cache, phone normaliser + PK classifier, WhatsApp evidence scorer, proxy abstraction, taxonomy/synonym config |
+| ✅ Phase 2 | Google Maps discovery — grid × synonym fan-out, payload interception, scroll to exhaustion, pacing, circuit breaker, cross-query dedupe |
+| ✅ Phase 3 | Business website module — wa.me, chat widgets, `tel:`, JSON-LD, emails, socials; 4-page crawl budget, no browser |
+| ⬜ Next | Phase 4 (dedupe + scoring + ranking), then Phase 5 (frontend + CSV export — **ship here**) |
 
-No stage has a body yet, so there is nothing to run end to end. Each stage
-raises `StageNotImplementedError` naming the phase that will build it — see
+Stages 1 and 2 have real bodies and run end to end. The other four raise
+`StageNotImplementedError` naming the phase that will build them — see
 [stages.py](backend/src/leadscraper/pipeline/stages.py).
+
+### What a run produces today
+
+Two live runs, both `salon`, discovery followed by website enrichment:
+
+| | Islamabad | Lahore |
+|---|---|---|
+| Businesses discovered | 199 | 60 |
+| With a phone | 174 | 60 |
+| Websites crawled | 62 domains | 31 domains |
+| **Phone numbers after enrichment** | **256** | **110** |
+| **WhatsApp `confirmed`** | **53** | **5** |
+| Emails | 41 | 24 |
+
+Before Phase 3 the `confirmed` column was structurally empty — §9.3 scores a
+bare `03xx` from a Maps listing at 0.60, *likely*, and nothing else in the
+pipeline could do better. Only a business's own site proves a number takes
+WhatsApp. Measurements and the caveats on them are in §5.2.
+
+```bash
+# Stage 1 — discovery (needs a PK proxy, or an explicit opt-out; see §7.1)
+PROXY_REQUIRED_SOURCES="" uv run python scripts/run_discovery.py \
+    --city Lahore --category salon --synonyms 1 --tiles 3
+
+# Stage 2 — website enrichment over that run
+uv run python scripts/run_enrichment.py --latest
+```
 
 ## Setup
 
@@ -60,8 +89,23 @@ backend/
       whatsapp.py            §9.3 evidence scoring
       cache.py               §7 content-addressed raw archive
       proxy.py               §7.1 egress routing
+      pacing.py              §7 delays, per-source circuit breaker, budgets
+      textnorm.py            §10.1 name normalisation, social-vs-website routing
+      maps_payload.py        §5.1 positional search-payload parser
+      webparse.py            §5.2 one page → wa.me, widgets, tel:, JSON-LD, email
+      site_evidence.py       §5.2+§9.3 a domain's pages → scored findings
+    sources/
+      google_maps.py         §5.1 grid fan-out, payload interception (Playwright)
+      website.py             §5.2 cache-first crawler, 4 pages/domain (httpx)
+    services/
+      discovery.py           Stage 1 orchestration
+      ingest.py              §10.1 cross-query dedupe and gap-filling merge
+      enrichment.py          Stage 2 orchestration and the contact merge rules
     db/models.py             §11 schema
     pipeline/                §2 six-stage queue wiring
+  scripts/
+    run_discovery.py         drive Stage 1 before the Phase 5 API
+    run_enrichment.py        drive Stage 2 over an existing run
   tests/
 ```
 
@@ -88,9 +132,22 @@ hasn't read why they were rejected.
 silently yields zero rows is the §5.5 failure mode — you harvest nothing and
 don't notice.
 
+**Evidence only ever moves up.** Stage 2 raises a contact's §9.3 score when the
+business's site proves the number, and records *which page* proved it in
+`wa_evidence_url`. It never lowers one: a site that happens not to mention
+WhatsApp is not evidence against a number. The same rule covers person names and
+confidence — this stage gap-fills and leaves Stage 4's territory alone.
+
+**For websites, a refusing host is not a refusing source.** §7's circuit breaker
+is per source, which is right for Maps. The website module is a few hundred
+unrelated hosts, and one 403 measurably cost a live run 19 healthy domains, so a
+refusal there abandons that domain only. Ten consecutive refusals — which means
+our egress is blocked, not one strict host — still stop the module. §5.2 records
+the measurement.
+
 ## Departures from implementation.md
 
-Three, all deliberate, all covered by a test that explains itself:
+Four, all deliberate, all covered by a test that explains itself:
 
 1. **`businesses.place_id` is unique per run, not globally.** §11's `TEXT UNIQUE`
    would make a business scrapeable exactly once ever, so the second run of
@@ -101,6 +158,10 @@ Three, all deliberate, all covered by a test that explains itself:
 3. **`phone.py` does not use §9.1's literal regex.** Three of the eight formats
    §9.1 lists as verified in live data do not match the regex §9.1 publishes.
    `test_published_regex_is_insufficient_for_its_own_examples` pins exactly which.
+4. **`contacts.wa_evidence_url` added.** §5.2's whole job is proving a number
+   Maps published, so the URL the number came from and the URL that proved it
+   are routinely different pages. §11 has one `source_url` and nowhere to record
+   the second, which would silently drop the provenance §1 requires.
 
 `do_not_contact` (§15) and `source_state` (§7) are also present; §15 requires the
 former in v1 but §11's SQL omits it.

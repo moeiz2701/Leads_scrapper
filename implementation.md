@@ -259,9 +259,11 @@ Measured over 3 live queries (Islamabad × salon, 249 raw results):
 | name / place_id | 100% | **phone** | **87%** |
 | address | 100% | rating | 100% |
 | lat / lng | 100% | category | 100% |
-| review_count | varies — see below | website | ~85% |
+| review_count | varies — see below | **website** | **39%** |
 
 > **Correction.** An earlier revision of this note claimed phone fill of 100%, measured over 40 results. That sample was the *first page only*. Across paginated results the true rate is **87%** — which lands almost exactly on this section's original "~85% have a listed phone". The 100% figure was an artefact of a small first-page sample, not a better source.
+
+> **Second correction, same cause — Aug 2026.** The website fill above read ~85% for exactly the same reason, and it is **39%** across the full 199-business Islamabad run (78 of 199 carry any URL; 63 a real website, 15 a Facebook or Instagram profile that §5.2 routes to the social columns). Businesses ranked onto page 1 are the ones that have a website, so a first-page sample overstates it by more than 2×. The honest figure is close to §14's original "~30% have sites", which the Phase 3 run then confirmed. **The lesson generalises: never characterise this payload from the first page.** Two of the three fill rates measured that way were wrong, and both were wrong in the optimistic direction.
 
 **Consequence:** Stage 2 for Maps parses search responses instead of performing ~700 detail-panel interactions. See the revised §14 timings. Detail panels drop to a *fallback* for the ~13% of records where the payload lacks a phone, not the default path.
 
@@ -313,6 +315,47 @@ Extract, in priority order:
 4. Regex over visible text (§9.1) → phone, lower confidence
 5. `a[href^="mailto:"]`, plus social profile links → feeds Stage 3
 6. JSON-LD `LocalBusiness` / `Organization` blocks → `telephone`, `founder`, `employee` (occasionally yields owner name)
+
+**Note — measured, Aug 2026 (Phase 3).** Built and run against the discovered businesses of two live Maps runs. Modules: `core/webparse.py` (page → fields), `core/site_evidence.py` (pages → §9.3-scored findings), `sources/website.py` (fetch/cache/budget), `services/enrichment.py` (Stage 2 body).
+
+| | Islamabad × salon | Lahore × salon |
+|---|---|---|
+| Businesses discovered | 199 | 60 |
+| With a website (§5.1 payload) | 63 → **62 domains** | 36 → **31 domains** |
+| Pages fetched | 91 (**1.5/domain**) | 26 |
+| Domains yielding something | 47 | 19 |
+| Domains dead (DNS/timeout/404) | 13 (21%) | 7 (23%) |
+| Domains refusing (403/429) | 0 | 2 |
+| New phone contacts | 82 | 50 |
+| Emails | 41 | 24 |
+| **Confirmed WhatsApp numbers** | **53** | **5** |
+| Businesses with ≥1 confirmed | 28 (45% of crawled domains) | 4 (13%) |
+| Owner names (JSON-LD `founder`) | 2 | 0 |
+
+Re-running the Islamabad pass inside the cache TTL took **13 seconds against ~5 minutes live**, made 0 requests and changed 0 rows — the §7 lever and the §10.1 "never discard, only fill gaps" merge, both visible in one command. Note the corollary: the §7 delay must be spent only behind a request that was actually made. Pacing after a cache hit would put the five minutes straight back.
+
+Four things worth acting on:
+
+- **This section's name is half right.** Of the 53 confirmed numbers, only **19 were confirmations of a number Maps already had** — the other **34 are numbers Maps never carried at all**. Put the other way: a business's own site confirmed just **15% of the Maps mobiles** (19 of 127), because the number a salon publishes as its WhatsApp is usually *not* the number it registered on its Maps listing. So §5.2 is a confirmation engine *and* a discovery source, and the second job is the bigger one. Do not size it as an enrichment-only pass.
+- **The 4-page budget is not the binding constraint — 1.5 pages per domain is.** The crawl stops as soon as it has a confirmed number and an email, and most sites give both on the homepage. The budget is a ceiling that is rarely reached, so raising it would buy very little; the yield lever is the 39% of businesses that have a site at all, not the depth of the crawl.
+- **Yield varies enormously by city/category slice** — 45% of crawled Islamabad domains produced a confirmed number against 13% in Lahore, on the same code and the same category. The Islamabad salon set skews to clinics and spas with real websites. **Measure per slice; do not extrapolate one run's confirmation rate into the §13 "estimated available" figure.**
+- **Roughly one domain in five is dead** (21% / 23%). That is a normal, permanent property of PK SMB hosting, not a fault to chase, and it must not be allowed to look like a failure — see the breaker note below.
+
+**Two implementation traps, both found by running it.**
+
+*One host refusing is not the source refusing.* §7's circuit breaker is specified per **source**, which is right for Maps — Maps is one source, and a 429 from Google means every later query is futile and rude. "Business websites" is not one source; it is a few hundred unrelated hosts. On the first live Lahore run a **single 403 from one salon's WAF tripped a source-level breaker and skipped 19 healthy domains**, turning a 61%-yield run into a 23% one. That is §7's "continue the run with the remaining sources" inverted. The rule this source needs:
+
+- A refusal (403/429/503) abandons **that domain**, immediately and without retry, and is recorded as a per-record outcome. It does not degrade the run.
+- A refusal **streak across 10 consecutive domains** is a different fact — that is our egress being blocked rather than one strict host — and *does* trip the source breaker.
+- The §5.5 empty-success check still applies, but at a threshold of 25 domains rather than 5. A real fraction of these sites are a splash image with no contact details, so a threshold of 5 false-trips about once every thousand domains; a genuine extractor break yields 0% and trips at 25 regardless.
+
+*A redirect splits the archive key from the evidence URL.* About **one domain in nine redirects http→https**, and the contact records the *final* URL as its WhatsApp evidence while the fetch is keyed on the *requested* one. Archive under only the requested URL and §2's re-parse path cannot find the page that proved the number; archive under only the final URL and the next run's cache lookup misses and re-fetches. Store the body under both — 7 of the first 53 confirmed rows were unresolvable against the archive until this was fixed.
+
+**Contact confidence does not follow the 1–6 order above.** That list ranks *WhatsApp* evidence, which is why JSON-LD sits last. For §10.2's `contact_confidence` — "is this really the business's number" — a machine-readable `telephone` inside a structured record beats a free-text digit run, so the ladder used is wa.me/widget 0.95 → JSON-LD 0.90 → `tel:` 0.85 → regex text 0.60. Two rankings, two different questions, both applied.
+
+**Not implemented, deliberately: `robots.txt`.** This source fetches at most 4 pages of a business's own public contact pages, once per run, at 1–3s per host. A default WordPress `robots.txt` permits it and a misconfigured one — common on this hosting — would zero out the module, which the §5.5 convention says is the outcome to avoid above all others. Revisit if a real complaint ever arrives.
+
+**Observed and left for Phase 8:** Maps sometimes returns a `linktr.ee/...` URL in the website field. That is a §6.4 bio-link, not a §5.2 website, and it should be routed to the bio-link follower rather than crawled as a site.
 
 ---
 
@@ -518,6 +561,8 @@ These measures exist for **reliability and politeness**, not concealment.
 | Per-source daily request budget | Hard ceiling, enforced in code |
 
 Circuit breaker: 3 consecutive failures or any CAPTCHA on a source → pause that source for 30 minutes, log it, surface it in the UI. Continue the run with remaining sources.
+
+> **Qualified by measurement, Aug 2026.** "Source" and "host" are the same thing for Maps, Zameen or BusinessList and are *not* the same thing for §5.2 business websites, which is a few hundred unrelated hosts behind one module name. Applying this rule per source there let one salon's WAF stop the crawler for 19 other salons. Where a module fans out over many independent hosts, a refusal breaks that **host**; only a streak of refusals across consecutive hosts breaks the source. See the §5.2 note for the measured case and the thresholds.
 
 ### 7.1 External dependencies — what you must buy vs. what's free
 
@@ -840,6 +885,8 @@ Worked example — **Lahore × salon**, core sources only:
 | **Qualified (score ≥ 60 + mobile)** | **~380** | **~31 min** |
 
 > **Revised Aug 2026.** This table previously budgeted 700 detail-panel interactions at 28 minutes, giving ~57 min per run. Phones are already in the search payload (§5.1), so panels are now a fallback for the ~13% of records without one rather than the main path. The old 28-minute figure also silently assumed ~4 parallel browser workers to reconcile with §5.1's stated 200–500 businesses/hour *per browser*; on a single worker it would have been closer to two hours.
+
+> **Website row confirmed, Aug 2026 (Phase 3).** The "~30% have sites" assumption in that row is the one figure in this table that has now been measured end to end, and it holds: **32%** of the 199 discovered Islamabad businesses carry a real website (39% carry any URL, the rest being FB/IG profiles that route to §6). Note this *contradicts* the ~85% website fill §5.1 used to claim — see the correction there; the 85% was a first-page sample. Crawl depth came in at **1.5 pages per domain** against the 4-page budget, so the 8-minute estimate has headroom rather than risk.
 
 **Measured yield, and what it means for the plan.** 3 queries (Islamabad × salon, 1 synonym, 3 tiles) produced **199 unique businesses, 174 with a phone**. At that rate the §5.1 full fan-out of 60 queries overshoots the 300–800 target by a wide margin — the practical constraint becomes runtime and politeness, not availability. Two consequences worth acting on:
 

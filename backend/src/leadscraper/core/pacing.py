@@ -43,6 +43,15 @@ class PacingPolicy:
 # §6.6 caps the social module far harder than the core sources.
 SOCIAL_PACING = PacingPolicy(delay_min=8.0, delay_max=20.0, concurrency=1)
 
+# §5.2 websites are paced *per host*, which is what politeness actually means,
+# and the §7 3–10s band is calibrated for the opposite situation: hitting one
+# search engine or directory hundreds of times in a run. A business's own site
+# sees at most 4 requests in a whole run (the §5.2 crawl budget), so a 1–3s gap
+# between them is already gentler per host than the §7 default is per source —
+# and it is the difference between §14's 8-minute website budget and 16 minutes
+# of sleeping. Concurrency here is across *different* domains, never within one.
+WEBSITE_PACING = PacingPolicy(delay_min=1.0, delay_max=3.0, concurrency=3)
+
 
 class BudgetExceededError(RuntimeError):
     """Per-source daily request ceiling hit (§7, 'hard ceiling, enforced in code')."""

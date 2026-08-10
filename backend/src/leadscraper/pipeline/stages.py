@@ -62,9 +62,20 @@ def stage_discovery(run_id: uuid.UUID, synonym_limit: int | None = None) -> Stag
     return run_maps_discovery(run_id, synonym_limit=synonym_limit)
 
 
-def stage_contact_enrichment(run_id: uuid.UUID) -> StageResult:
-    """Stage 2 — Maps detail panel, own website, wa.me links, directories."""
-    raise StageNotImplementedError(Stage.CONTACT_ENRICHMENT, "Phase 2–3")
+def stage_contact_enrichment(run_id: uuid.UUID, limit: int | None = None) -> StageResult:
+    """Stage 2 — the business's own website (§5.2).
+
+    The stage that produces `confirmed` WhatsApp labels: wa.me links, chat
+    widgets, ``tel:`` and JSON-LD, on a 4-page-per-domain budget and no browser.
+
+    Two of this stage's inputs are still outstanding and will join here rather
+    than replacing what is below — the Maps detail-panel fallback for the ~13%
+    of records whose search payload carried no phone (§5.1), and the directory
+    corroboration layer (§5.3, Phase 6).
+    """
+    from leadscraper.services.enrichment import run_website_enrichment
+
+    return run_website_enrichment(run_id, limit=limit)
 
 
 def stage_social_enrichment(run_id: uuid.UUID) -> StageResult:
@@ -107,7 +118,9 @@ STAGE_FUNCTIONS = {
 # the API reads it to refuse a run with a clear message rather than enqueuing
 # work that can only fail. Deliberately a declared list, not something probed by
 # calling the functions — probing a stage means running it.
-IMPLEMENTED_STAGES: frozenset[Stage] = frozenset({Stage.DISCOVERY})
+IMPLEMENTED_STAGES: frozenset[Stage] = frozenset(
+    {Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT}
+)
 
 
 def implemented_stages() -> list[Stage]:

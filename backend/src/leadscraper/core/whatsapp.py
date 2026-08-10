@@ -124,13 +124,20 @@ def mentions_whatsapp_near(
 def evaluate(
     text: str,
     phone_e164: str,
-    phone_span: tuple[int, int],
+    phone_span: tuple[int, int] | None,
     line_type: LineType,
     wa_numbers: list[str] | None = None,
     widget_numbers: list[str] | None = None,
     platform_button_numbers: list[str] | None = None,
 ) -> WaEvidence:
-    """Score one number against every signal available on one page."""
+    """Score one number against every signal available on one page.
+
+    ``phone_span`` is ``None`` when the number does not appear in this page's
+    visible text — a ``wa.me`` href or a JSON-LD ``telephone`` with nothing
+    printed on screen. The proximity check is then skipped rather than run
+    against an arbitrary offset, which would score whatever happens to sit at
+    the top of the page.
+    """
     signals: set[WaSignal] = {baseline_signal(line_type)}
 
     if phone_e164 in (wa_numbers or []):
@@ -139,7 +146,7 @@ def evaluate(
         signals.add(WaSignal.CHAT_WIDGET)
     if phone_e164 in (platform_button_numbers or []):
         signals.add(WaSignal.PLATFORM_BUTTON)
-    if mentions_whatsapp_near(text, phone_span):
+    if phone_span is not None and mentions_whatsapp_near(text, phone_span):
         signals.add(WaSignal.TEXT_PROXIMITY)
 
     return score_signals(signals)

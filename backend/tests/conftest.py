@@ -54,6 +54,13 @@ def _test_engine() -> Engine | None:
 
     engine = create_engine(_test_database_url(), future=True)
     try:
+        # Dropped first, then recreated. ``create_all`` alone only ever *adds*
+        # tables, so a column added to a model since the last run would be
+        # missing from a test database created before it — the suite then fails
+        # with an UndefinedColumn that looks like a code bug and is not one.
+        # This database exists only for the suite and every test rolls back, so
+        # there is nothing here worth keeping between sessions.
+        Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
     except SQLAlchemyError:
         return None

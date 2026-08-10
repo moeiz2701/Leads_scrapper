@@ -117,6 +117,12 @@ class Contact(Base):
     operator: Mapped[str | None] = mapped_column(Text)
     wa_evidence: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
     wa_label: Mapped[str | None] = mapped_column(Text)
+    # WhatsApp evidence routinely comes from a *different* page than the number
+    # did: §5.2's whole point is that a business's own site confirms a number
+    # Maps published. Without this column that upgrade would silently discard
+    # its provenance — `source_url` still points at the Maps listing, and §1
+    # requires every record to say which URL its evidence came from.
+    wa_evidence_url: Mapped[str | None] = mapped_column(Text)
     person_name: Mapped[str | None] = mapped_column(Text)
     person_role: Mapped[str | None] = mapped_column(Text)
     attribution: Mapped[str | None] = mapped_column(Text)

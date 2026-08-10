@@ -14,6 +14,7 @@ from leadscraper.pipeline.stages import (
     implemented_stages,
     missing_stages,
 )
+from tests.conftest import requires_db
 
 
 def test_all_six_stages_are_registered() -> None:
@@ -38,14 +39,27 @@ def test_unimplemented_stages_raise_rather_than_return_empty(stage: Stage) -> No
 
 def test_stage_registry_is_declared_not_probed() -> None:
     """The registry is a declaration that flips as each phase lands — probing it
-    by calling the stage functions would mean running them."""
-    assert implemented_stages() == [Stage.DISCOVERY]
-    assert Stage.DISCOVERY not in missing_stages()
+    by calling the stage functions would mean running them.
+
+    Phase 2 gave Stage 1 a body; Phase 3 gives Stage 2 the §5.2 website module.
+    Stage 2's other inputs (the Maps detail-panel fallback, §5.3 directories)
+    join that body later rather than replacing it, so the flag flips here once.
+    """
+    assert implemented_stages() == [Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT]
+    assert not set(implemented_stages()) & set(missing_stages())
     assert set(implemented_stages()) | set(missing_stages()) == set(Stage)
 
 
-def test_a_missing_run_fails_loudly(  ) -> None:
+@requires_db
+@pytest.mark.parametrize("stage", [Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT])
+def test_a_missing_run_fails_loudly(stage: Stage) -> None:
     """An implemented stage handed a nonexistent run must raise, not return a
-    zero-count StageResult that reads like a successful empty run."""
+    zero-count StageResult that reads like a successful empty run.
+
+    Marked ``requires_db`` because an implemented stage opens a session before
+    it can discover the run is missing. Without the marker this fails with a
+    connection error when Postgres is down, which reads like a broken stage and
+    is not one.
+    """
     with pytest.raises(ValueError, match="No such run"):
-        STAGE_FUNCTIONS[Stage.DISCOVERY](uuid.uuid4())
+        STAGE_FUNCTIONS[stage](uuid.uuid4())
