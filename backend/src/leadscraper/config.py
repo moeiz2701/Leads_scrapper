@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
 
+    # Run stages inline inside the caller instead of handing them to a worker
+    # (RQ's ``is_async=False``). Because §2's stages chain themselves, this one
+    # flag turns the whole pipeline synchronous — which is what the tests use and
+    # what a machine with no worker running needs. The API code path is identical
+    # in both modes, so they cannot drift apart.
+    queue_sync: bool = False
+
     # ---------------------------------------------------------------- storage
     raw_archive_dir: Path = Path("./data/raw")
 

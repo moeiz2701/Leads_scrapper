@@ -81,6 +81,15 @@ Six stages, each an independent queue consumer. **Do not build this as one brows
 
 **Never re-fetch what you have.** A content-addressed cache on URL hash with a TTL (7 days for listings, 30 for detail pages) cuts your request volume by 60–80% across runs and is the single biggest thing that keeps you under rate limits.
 
+**Note — decided and built, Aug 2026 (Phase 5). RQ, not synchronous.** Phase 1 left the queues with no producer and no consumer; stages ran synchronously from `scripts/`. That worked, and a full Islamabad run is only ~5 minutes, so the choice was genuinely open. It went to the queue on this section's own argument — *"you need to re-run stage 3 without re-running stage 1"* — because that makes a stage the unit of retry and re-running one a **normal operation, not a recovery**. `POST /api/runs/{id}/stages/{stage}` is that operation, and it does not chain. Three consequences followed rather than motivated it: a 5-minute blocking POST is a timeout on any proxy between the browser and the API; §13 Screen 2's counters must move *while* work is in flight, which a blocking request cannot do; and Cancel needs something to cancel.
+
+Two implementation notes worth recording:
+
+- **Stages chain themselves; RQ's `depends_on` is unused.** Each job enqueues its successor on success, which keeps the failure semantics in code that knows what §5.5 means. It also means there is at most **one job in flight per run**, which is what makes Cancel's behaviour describable in one sentence (below).
+- **`QUEUE_SYNC=true` collapses the whole thing to the synchronous mode**, because self-chaining plus RQ's `is_async=False` runs the entire pipeline inside the caller. The API code path is identical in both modes, so they cannot drift. The test suite uses it.
+
+**RQ's default worker cannot run on Windows** — it forks per job and `os.fork` does not exist there. `scripts/worker.py` selects `SimpleWorker` when `os.fork` is absent. The cost is real: a job that takes the process down takes the worker with it, where a forking worker would have survived and marked the job failed. `jobs.run_stage_job` records the failure on the run *before* re-raising, so the record survives even when the process does not.
+
 ---
 
 ## 3. Input specification
@@ -147,6 +156,8 @@ This controls **ranking**, not filtering (except `whatsapp_only`).
 - **"Main business line" cannot mean "not a mobile"**, because the same row of the table puts plain `landline` in `business_first`'s *bottom* tier. It is read as the number the business publishes as its own: a UAN, which exists for no other purpose, or the number on its own Maps listing, which the business itself registered. Landlines found elsewhere fall through to the residual tier.
 - **The `whatsapp_only` filter is expressed as `rank = NULL`, never as a delete.** §10.1 says never discard a contact and §15 needs the row for provenance, so an excluded number keeps its row and only loses its export slot — switching the preference back is lossless. The filter keeps the `likely` band: §9.3 scores a bare `03xx` at 0.60 precisely because a PK mobile probably does take WhatsApp, and restricting it to `confirmed` would cut the Islamabad run from 256 numbers to 53 and read to the operator as a broken run rather than as a filter they chose.
 - **A number takes at most one ranked slot.** After a §10.1 merge the same E.164 can sit on two rows of one business, each a real provenance record. The better-evidenced row wins the slot and its duplicate goes unranked, so §12.1 never shows the operator the same number as both `phone_1` and `phone_2`.
+
+**Note — decided, Aug 2026 (Phase 5). Re-ranking stays in Stage 5.** When the operator changes `number_preference` the alternative was to rank at read time in the exporter, which would avoid a re-run entirely. Both are defensible; ranking stayed in the stage for one reason: **`contacts.rank` is a real, indexed column that §12.1, §13 Screen 3 and the CSV all read**, so it must never disagree with the run's preference, and one writer is how that stays true. Read-time ranking would also fork §3.3 into two implementations — a sort in the exporter and a column in the database — that could rot apart silently. `PATCH /api/runs/{id}/preference` therefore updates `runs.number_pref` and enqueues Stage 5 alone. It is pure database work and measured at **0.2 s** on the 60-business Lahore run, so correctness wins outright rather than on a trade.
 
 ---
 
@@ -665,6 +676,8 @@ Merge strategy: keep the highest-confidence value per field, **union all contact
 
 *Scope: within one run.* The section does not say, so this is a decision. A `businesses` row belongs to exactly one run (`run_id NOT NULL`), so a cross-run merge has nowhere to put the survivor — whichever run owned it would be claiming a business the other one found, destroying the record §16's "validate by re-running" depends on. And `place_id` is unique *per run* precisely so a run can be repeated. Measured on the four Lahore × salon runs in the database: **232 place_ids collapse to 72, and three of the four overlap 100% with each other.** A cross-run merge would not be deduplicating a table, it would be deleting three runs. The operator's real want — one table, not four — is a **read-side** concern for Phase 5: the results view can union runs and collapse on `place_id` at query time without destroying anything.
 
+**Note — the read-side union landed in Phase 5, Aug 2026, as this note proposed.** `services/results.py` takes a set of runs and, with `collapse=true`, folds rows sharing a `place_id` at query time. Measured on the four Lahore × salon runs: **232 rows collapse to 72**, exactly the figure predicted below, and **no run is modified** — §16's "validate by re-running" still has four runs to compare. Two rules the read side needs that the write side never had to answer: the winner is the best-scored row, then the most recently scraped, because the run that *enriched* a business knows more about it than the run that only discovered it (§10.2 measured that gap as 22 qualified against 0); and a business with **no** `place_id` is always kept, since collapsing rows that share nothing would be a merge asserted on no evidence — this section's own failure mode, arriving through the read path.
+
 *Tier 1 (exact phone) and tier 4 (domain) merge chains into single rows.* Across both runs, **36 groups of businesses share a phone number and 7 share a domain, and not one of them is a duplicate:**
 
 | Shared key | Businesses | Apart | What it actually is |
@@ -888,6 +901,22 @@ Server-side endpoint `GET /api/runs/{id}/export.csv?filter=...` — generate ser
 - Filename: `{city}_{category}_{YYYYMMDD}_{n}leads.csv`
 - Respect the active table filters and sort order
 
+**Note — built, Aug 2026 (Phase 5).** `export/` (columns, row projection, CSV writer) and `services/results.py` (the query layer). All four bullets hold; what needed deciding was the architecture around them.
+
+**"Respect the active filters" is an architectural requirement, not a behavioural one.** It makes any divergence between the table and the CSV a defect *by definition*, so the two cannot be allowed to be separate code paths that happen to agree. There is therefore **one** `ResultQuery`, **one** `fetch_results`, and **one** FastAPI filter dependency shared by `GET /api/results` and `GET /api/runs/{id}/export.csv`. The frontend's Export button reuses the exact query string the table is displaying. `test_export_and_table_are_the_same_rows` and `test_export_respects_the_same_filters_as_the_table` are the tests that fail if anyone gives the exporter its own parsing.
+
+**The Excel armour lives only in the CSV writer.** The row projection emits clean values — `None` for missing, a plain `+923001234567` for a phone — and the writer decorates. That split is what lets the JSON table and the CSV be *the same data by construction*; a projection that emitted `="+92…"` would put a formula on screen.
+
+**Filtering below the run level happens in Python, deliberately.** The §13 contact-level filters (WhatsApp status, phone type, source) are predicates over the *exported* contact set, which is `rank` + §15 suppression + §12.1's 4-slot cap taken together. Expressing that in SQL means reimplementing §12.1 in a second language where it can rot independently. Run scoping and the score floor are pushed into SQL so what is materialised stays bounded by one run — the largest is 199 businesses. Revisit if a run ever reaches five figures.
+
+**Three things the projection refuses to do**, each a rule from elsewhere in this document arriving at the last mile:
+
+- **A blank is never a zero.** `review_count` is absent on 100% of the Lahore run; exporting it as `0` would tell the operator every salon in Lahore has no reviews. §10.2's load-bearing rule does not stop at the scorer, and it does not stop at a placeholder either — a `-` or a `None` in a cell gets re-imported as data by whatever reads the file.
+- **`contact_person`, `contact_role` and `attribution` come from one contact.** A name from one number and a role from another is a join we never made (§8).
+- **`phone_count` counts distinct numbers, not provenance rows, and is uncapped.** The 4-slot cap is on columns; §10.1 never discards a contact, so a business with 7 numbers exports `phone_count = 7` and the operator can see the four shown are not all of them.
+
+**Measured, both enriched runs.** Islamabad × salon at `min_score=60` exports 41 columns × 45 rows, 31 KB, BOM intact, phones armoured, **6 rows with a blank `review_count`** and non-ASCII business names surviving the round trip. Lahore × salon exports 22.
+
 ---
 
 ## 13. Frontend specification
@@ -923,9 +952,38 @@ Minimal, three screens.
 
 **Estimated available** is important. For narrow category/city pairs (padel in Faisalabad) the honest number is 30–50, not several hundred. Show it before the run starts so nobody waits an hour for a thin result.
 
+**Note — resolved by measurement, Aug 2026 (Phase 5). The two halves of that line are different kinds of question, and only one of them is ours to answer.**
+
+§5.2 forbids the second number outright — *"Measure per slice; do not extrapolate one run's confirmation rate into the §13 estimated-available figure"* — but the mockup shows one, and that tension had to be resolved rather than split the difference. The resolution:
+
+- **Runtime is ours.** It falls out of the query plan and our own §7 pacing. Measured from this installation's live discovery runs and shown as a **range**, tagged with its basis (`measured` / `measured_single_run` / `doc_projection`).
+- **Availability is the market's.** How many salons exist in Faisalabad is a fact about Faisalabad. It is reported **only where this exact city × category has been run before**, as that run's actual outcome; otherwise the screen reads **"no basis · never run"**.
+
+**The measurement that settles it.** Unique businesses per Maps query, same category, three cities:
+
+| Islamabad × salon | Lahore × salon | Karachi × salon |
+|---|---|---|
+| 66 / query | 20 / query | 19.5 / query |
+
+A **3.4× spread inside one category**. Any single multiplier is wrong for two of the three cities. Worse for anyone hoping to fit a curve: the two Lahore runs disagree in the *wrong direction* — 3 queries returned 60 unique and 6 queries returned 52 — so the data does not support a monotonic yield model, let alone a point estimate. Prior measured outcomes are therefore reported **unscaled**, with a caveat naming the query count they were measured at, because §14 also measured a 67% duplicate rate across near-synonyms: unique yield saturates rather than growing with the plan.
+
+**A second refusal, for a different reason.** Where a slice has prior runs that were never enriched, the business count is real but the *qualified* count is structurally 0 (§10.2: three discovery-only Lahore runs at 0 against the enriched one's 22). Publishing that 0 as a forecast would read as "this city has no leads" rather than "that run was not finished", so it is withheld and the reason is stated.
+
+**Stage timing did not exist and now does.** The estimator had nothing to measure against: the six runs in the database carry only a run-level wall clock that includes every re-run of every stage, and three of them were cache hits that finished in under half a second. `jobs.finish_stage` now writes `elapsed_seconds` into each stage's report in `runs.stats`, so this gets more honest with every run rather than staying pinned to §14's published constants.
+
 ### Screen 2 — Run Progress
 
 Per-stage counters (discovered / enriched / attributed / deduped / qualified), a live log tail, per-source status pills (`ok` / `throttled` / `blocked`), and a Cancel button. Results stream into the table as they qualify — don't make the operator wait for the full run.
+
+**Note — built, Aug 2026 (Phase 5).** Three corrections to what this section assumed was already available.
+
+**The status pills had a table and no writer.** `source_state` has existed since Phase 1 and **nothing had ever written a row** — `core/pacing.BreakerRegistry` is in-process and dies with the worker, so its `statuses()` was unreachable from the API. `jobs.persist_source_state` now projects each stage's report onto `source_state` when the stage completes. It preserves §5.2's distinction rather than flattening it: **a few refusals are `throttled`, only our egress being blocked is `blocked`** — conflating those once cost a live run 19 healthy domains. Verified on the Lahore run, whose 2 refused hosts surface as `throttled`, not `blocked`.
+
+**The counters read `runs.stats`, not a second counter path.** Every stage already writes its report there under its own key, and the CLI run summary reads the same place — so the screen and the console cannot report different numbers for one run. The job wrapper *merges* timing into that report rather than replacing it, or the counters Phases 2–4 produce would be destroyed on completion.
+
+**Cancel stops the pipeline at the next stage boundary, and the UI says so.** It drops every queued stage immediately and marks the run cancelled, so the next stage refuses to start. **A stage already executing runs to completion** — killing a worker mid-Playwright would leave the §7 cache and the breaker state inconsistent, and the longest stage here is minutes. Because stages chain themselves (§2) there is at most one job in flight per run, so "the current stage, then stop" is the entire behaviour and can be stated in one line on screen rather than implying an instant halt.
+
+**One bug this screen found.** A single-stage re-run (`chain=False`) left the run at `running` for ever, because nothing downstream was coming to close it — Screen 2 showed a spinner on a run that had finished seconds earlier. That is the mirror image of §5.5's rule and just as misleading, so a non-chaining stage now brings the run to a terminal status itself.
 
 ### Screen 3 — Results Table
 
@@ -938,9 +996,23 @@ Per-stage counters (discovered / enriched / attributed / deduped / qualified), a
 - **Export CSV** button, top right, exports the current filtered view
 - Bulk select → delete (for honouring removal requests)
 
+**Note — built, Aug 2026 (Phase 5).** Next.js 16 + TanStack Table + `@tanstack/react-virtual`, per §2's stack. Everything above is implemented; four things are worth recording.
+
+**Sorting and filtering are server-side, and TanStack's client-side models are deliberately unused.** §12.2 requires the CSV to be the filtered, *sorted* set on screen. If the table sorted in the browser, the Export button would produce a differently-ordered file from the view it was clicked on — the divergence §12.2 exists to prevent, arriving through the sort rather than the filter. So filter state is a query string that both the table and the export read, and TanStack does what it is uniquely good at here: column definitions, visibility state, virtualisation.
+
+**Virtualised with spacer rows, not absolute positioning.** The usual `translateY` approach needs flex rows with fixed widths, which loses the `<thead>`/`<tbody>` column alignment that a real table gives for free — and this section asks for a *sticky header over sortable columns*, so that alignment is the feature, not a detail.
+
+**The evidence panel is a drawer rather than an inline expanded row.** A variable-height row inside a virtualised body throws off the spacer arithmetic that keeps the scrollbar honest. This section asks for an evidence panel, not specifically an inline one.
+
+**The empty table explains itself, because the most common empty table here is not an error.** §10.2 measured that a discovery-only run has **0 qualified leads by construction**, and four such runs are in the database. A bare "no results" under `min_score ≥ 60` would read as a broken filter; the screen instead says the §5.2 website pass has not run and points at the button that runs it.
+
 ### Settings
 
 Proxy endpoint + credentials · per-source rate limits and daily budgets · SERP/Meta API keys · cache TTL · dedupe fuzzy threshold · concurrency · default city list.
+
+**Note — built read-only, Aug 2026 (Phase 5).** Everything listed already resolves through `config.Settings`, which is the codebase's single reader of `os.environ`. A settings *write* path would introduce a second source of truth that could disagree with the `.env` file on disk, and for a single-operator tool "edit `.env` and restart" is both honest and shorter than the code that would replace it. Secrets are reported as booleans and never echoed.
+
+The screen carries two things beyond the list above, both of which exist to make an invisible state visible: **whether anything is actually consuming the queues** (with no worker and no `QUEUE_SYNC`, a created run sits at `queued` for ever and looks like a hang rather than a missing process), and **the per-slice WhatsApp confirmation spread** — so the 45%/13% gap that makes Screen 1 refuse to estimate availability is something the operator can see rather than take on trust.
 
 ---
 
@@ -988,6 +1060,18 @@ Comfortably inside the "few hundred good-quality leads" target for broad categor
 - **Provenance and deletion.** Every contact row carries `source_url` and `scraped_at`. Build the bulk-delete path in v1 — you will need it, and retrofitting it is painful.
 - **Suppression list.** A `do_not_contact` table checked at export time. Anyone who asks to be removed goes in permanently, and it survives re-runs.
 
+**Note — built, Aug 2026 (Phase 5).** The table had existed since Phase 1 and **nothing had ever queried it**. Two decisions.
+
+**Deleting is not removing, and the suppression entry is the durable half.** This is the whole design of the bulk-delete path. Deleting a business row honours a removal request right up until the next run rediscovers the same salon from the same Maps listing and puts it straight back — which makes row deletion the *cosmetic* half of the operation and `do_not_contact` the part that satisfies "survives re-runs". So `POST /api/do-not-contact/bulk-delete` **suppresses first, then deletes, in one transaction**: every number on the selected businesses plus the registrable domain where there is one. Deleting without suppressing is still possible, because clearing a test run is a real need, but it returns an explicit warning saying the rows will come back — it is never silent.
+
+**Checked on every read, not only at export.** This section says "checked at export time"; that is the minimum and it is not enough on its own. A suppressed number that still renders as `phone_1` on §13 Screen 3 is a number the operator dials. And since §12.2 requires the file to match the screen anyway, applying suppression anywhere *other* than the shared query layer would create exactly the divergence that section forbids. So it lives in `services/results.py` and both endpoints inherit it. Three rules fell out of doing it there:
+
+- A suppressed **number** removes that number from the ranked slots.
+- A suppressed **domain** removes the whole business — that is the business itself asking, not one line being retired.
+- A business whose numbers are *all* suppressed leaves the table: there is nothing left to ring. A business that never had a phone is a different fact and stays — 25 of the 199 Islamabad businesses are in that state and they are bad leads, not removal requests.
+
+**The rows are never destroyed by suppression, and the counts are never hidden.** An excluded contact keeps its row (§10.1 never discards a contact; this section needs it for provenance), and every response reports `suppressed_contacts` / `suppressed_businesses` — carried on the CSV as `X-Leads-Suppressed-*` headers too. §15 applied silently is §15 nobody trusts, and an operator seeing 44 rows where a colleague saw 45 needs to know a suppression did that rather than a bug.
+
 ---
 
 ## 16. Build order
@@ -998,7 +1082,7 @@ Comfortably inside the "few hundred good-quality leads" target for broad categor
 | **2** | Google Maps module (grid fan-out, network interception, detail panels) | 5–7 d |
 | **3** | Website module (wa.me, widgets, tel:, JSON-LD) | 2–3 d |
 | **4** | Dedupe + scoring + ranking by `number_preference` | 2–3 d |
-| **5** | Frontend: run form, progress, table, CSV export | 4–5 d |
+| **5** ✅ | Frontend: run form, progress, table, CSV export | 4–5 d |
 | **6** | Directory modules (BusinessList, UrduPoint) | 2–3 d |
 | **7** | Vertical modules (PakPlay, Turfy, Zameen click-reveal, Foodpanda) | 4–5 d |
 | **8** | FB/IG Tiers 2–3 (SERP + bio-link follow) | 3–4 d |
@@ -1006,6 +1090,14 @@ Comfortably inside the "few hundred good-quality leads" target for broad categor
 | **10** | Meta API cutover (start review at Phase 1) | 1–2 d + review wait |
 
 **Ship after Phase 5.** That's Maps + websites + a working table with export — roughly 80% of the value, and it tells you whether the real hit rate matches §14 before you invest in the long tail.
+
+**Note — Phase 5 complete, Aug 2026. This is the ship gate, and it is reached.** Delivered: §12.1's 41-column projection and §12.2's CSV export; a FastAPI app (run create/list/detail/cancel, single-stage re-run, preference change, results table, both export endpoints, §15's compliance routes, and the §13 pickers reading from `taxonomy` so §4.2's dictionary has one definition); §2's queue given producers, a consumer and a worker entrypoint; and §13's three screens plus Settings in Next.js. §15's suppression check and bulk-delete path landed here too, and §10.1's cross-run union with them.
+
+The "4–5 d" estimate was for **four separate deliverables plus two**, and the queue and the frontend are each comparable in size to the export work the row of this table names. Anyone re-planning from this table should read that row as four items, not one.
+
+**What Phase 5 does not include.** §3.2's seed mode is still unimplemented and still unassigned to a phase, though §13 Screen 1 is now where it would surface. The §5.1 Maps detail-panel fallback for the ~13% of records with no phone in the payload is still unbuilt. Directories are accepted on the run form and warned about rather than refused, because they are additive to a Maps run — but they contribute nothing until Phase 6.
+
+**The §16 validation pass below is now the immediate next thing, and the exporter is how you produce its sample.** A 50-row hand-check sample comes straight out of `GET /api/runs/{id}/export.csv`.
 
 ### Validation before scaling
 

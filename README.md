@@ -11,7 +11,8 @@ ignoring it.
 
 ## Status
 
-Phases 1–4 of the §16 build order are complete. Phases 5–10 are outstanding.
+Phases 1–5 of the §16 build order are complete. **§16's ship gate is reached.**
+Phases 6–10 are outstanding.
 
 | | |
 |---|---|
@@ -19,12 +20,14 @@ Phases 1–4 of the §16 build order are complete. Phases 5–10 are outstanding
 | ✅ Phase 2 | Google Maps discovery — grid × synonym fan-out, payload interception, scroll to exhaustion, pacing, circuit breaker, cross-query dedupe |
 | ✅ Phase 3 | Business website module — wa.me, chat widgets, `tel:`, JSON-LD, emails, socials; 4-page crawl budget, no browser |
 | ✅ Phase 4 | §10.2 lead scoring, §3.3 ranking by `number_preference`, §10.1 dedupe cascade |
-| ⬜ Next | Phase 5 (frontend + CSV export — **ship here**) |
+| ✅ Phase 5 | §12 CSV export, FastAPI, the §2 queue given producers + a worker, §13's three screens + Settings, §15 suppression + bulk delete, §10.1's cross-run union |
+| ⬜ Next | **§16 validation pass — needs a human.** Hand-check 50 rows, then tune the weights |
 
 Stages 1, 2, 5 and 6 have real bodies and run end to end. Stages 3 and 4 raise
 `StageNotImplementedError` naming the phase that will build them — see
-[stages.py](backend/src/leadscraper/pipeline/stages.py). Stage 6's export half is
-Phase 5 and joins the same body.
+[stages.py](backend/src/leadscraper/pipeline/stages.py). The API reads
+`IMPLEMENTED_STAGES` and refuses a run it cannot perform rather than starting one
+that would silently omit a source the operator chose.
 
 ### What a run produces today
 
@@ -63,6 +66,30 @@ uv run python scripts/run_enrichment.py --latest
 uv run python scripts/run_scoring.py --latest
 uv run python scripts/run_scoring.py --latest --preference whatsapp_only
 ```
+
+## Running the app
+
+Three processes. The scripts above still work and are the quickest way to drive a
+single stage.
+
+```bash
+docker compose up -d                                   # Postgres :5433 + Redis :6379
+
+cd backend
+uv run uvicorn leadscraper.api.app:app --reload         # API      :8000
+uv run python scripts/worker.py                         # the queue consumer
+
+cd ../frontend
+npm install && npm run dev                              # UI       :3000
+```
+
+**Start the worker, or nothing consumes the queues** — a created run sits at
+`queued` for ever, which looks like a hang rather than a missing process. The
+Settings screen says so out loud when it happens. `QUEUE_SYNC=true` runs stages
+inline in the API instead, which is what the tests use.
+
+RQ's default worker forks per job and `os.fork` does not exist on Windows, so
+[worker.py](backend/scripts/worker.py) selects `SimpleWorker` there.
 
 ## Setup
 
@@ -119,13 +146,34 @@ backend/
       enrichment.py          Stage 2 orchestration and the contact merge rules
       scoring.py             Stage 5 — normalise, score, rank
       dedupe.py              Stage 6 — the §10.1 cascade and merge
+      results.py             the read side — §13 filters, §15 suppression, §10.1 union
+      estimates.py           §13 Screen 1's estimate, and what it refuses to say
+    export/
+      columns.py             §12.1's 41 columns, as data
+      rows.py                one business + contacts → one row. Pure
+      csv_writer.py          §12.2 — BOM, Excel armour, filename
+    api/
+      app.py                 the FastAPI app
+      deps.py                the §13 filter bar, shared by table and export
+      routes/                runs · results · suppression · meta
     db/models.py             §11 schema
-    pipeline/                §2 six-stage queue wiring
+    pipeline/
+      queues.py              §2 per-stage queues, enqueue, cancel
+      stages.py              the six stage entry points
+      jobs.py                what a worker runs; status, timing, source pills
   scripts/
-    run_discovery.py         drive Stage 1 before the Phase 5 API
+    run_discovery.py         drive Stage 1 directly
     run_enrichment.py        drive Stage 2 over an existing run
     run_scoring.py           drive Stages 5–6 over an existing run
+    worker.py                the queue consumer
   tests/
+frontend/                    §13's three screens + Settings (Next.js, TanStack)
+  app/
+    page.tsx                 Screen 1 — new run, and the honest estimate
+    runs/[id]/page.tsx       Screen 2 — progress, source pills, cancel
+    results/page.tsx         Screen 3 — the table, export, bulk delete
+    settings/page.tsx        §13 Settings, read-only
+  lib/api.ts                 the backend as types; one filter → one query string
 ```
 
 ## Things worth knowing before you change anything
@@ -184,6 +232,28 @@ number from a Maps listing is a §9.3 *likely* at 0.60 and nothing else in the
 record lifts a business over 60. Stage 2 is not an uplift on this scale — it is
 the difference between a table and an empty filter.
 
+**The table and the CSV are one query, not two that agree.** §12.2 says the export
+must respect the active filters and sort order, which makes any divergence a
+defect *by definition* — so there is one `ResultQuery`, one `fetch_results`, and
+one FastAPI filter dependency behind both endpoints. Sorting is server-side for
+the same reason: a browser-side sort would export a differently-ordered file from
+the view the button was clicked on. Never give the exporter its own filter
+parsing.
+
+**Deleting is not removing.** §15 needs a removal to survive re-runs, and deleting
+a business row does not — the next run rediscovers it from the same Maps listing.
+So bulk delete writes the `do_not_contact` entries *first* and deletes in the same
+transaction. The suppression is the durable artifact; the row deletion is
+cosmetic. Deleting without suppressing is allowed and always returns a warning
+saying the rows will come back.
+
+**Screen 1 will not invent an availability number.** Per-query yield varies **3.4×
+across cities inside one category** (Islamabad 66, Lahore 20, Karachi 19.5), and
+the two Lahore runs disagree in the wrong direction — 3 queries gave 60 unique,
+6 gave 52. So `services/estimates.py` reports *runtime* (ours, from the query plan
+and §7 pacing) and refuses *availability* for any slice that has never been run.
+§5.2 requires this explicitly. Do not add a multiplier here.
+
 **For websites, a refusing host is not a refusing source.** §7's circuit breaker
 is per source, which is right for Maps. The website module is a few hundred
 unrelated hosts, and one 403 measurably cost a live run 19 healthy domains, so a
@@ -215,4 +285,32 @@ Five, all deliberate, all covered by a test that explains itself:
    ceiling that sets the corroborated threshold.
 
 `do_not_contact` (§15) and `source_state` (§7) are also present; §15 requires the
-former in v1 but §11's SQL omits it.
+former in v1 but §11's SQL omits it. Both got their first reader and first writer
+in Phase 5 — `source_state` had been empty since Phase 1 because
+`BreakerRegistry` is in-process and dies with the worker.
+
+## What a run produces, end to end
+
+```
+Islamabad × salon  ·  199 businesses  ·  45 scoring ≥ 60  ·  28 with a confirmed number
+                      → GET /api/runs/{id}/export.csv?min_score=60
+                      → Islamabad_salon_20260810_45leads.csv   41 columns, 31 KB
+```
+
+The four Lahore × salon runs hold 232 `place_id` rows that are **72 real
+businesses**; the results table collapses them at query time with
+`?collapse=true` and modifies no run (§10.1).
+
+## Next: the §16 validation pass — it needs a human
+
+The exporter exists to produce its sample. Take 50 random rows and check: is the
+phone correct and reachable, is `phone_1` genuinely the best number under the
+chosen preference, do `confirmed` labels hold up when dialled, what is the true
+duplicate rate. Two findings make it urgent — the ≥ 60 qualification bar has
+**never been calibrated**, and §14's projected 63% qualification rate measured at
+26–37%. Tune the weights against that ground truth *before* building more source
+modules.
+
+Still open, and unchanged by Phase 5: no PK residential proxy, so all counts are
+from a direct connection and real market variation cannot be separated from Maps
+geo-ranking against a non-PK IP (§5.1, §7.1).
