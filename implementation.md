@@ -355,7 +355,11 @@ Four things worth acting on:
 
 - **This section's name is half right.** Of the 53 confirmed numbers, only **19 were confirmations of a number Maps already had** — the other **34 are numbers Maps never carried at all**. Put the other way: a business's own site confirmed just **15% of the Maps mobiles** (19 of 127), because the number a salon publishes as its WhatsApp is usually *not* the number it registered on its Maps listing. So §5.2 is a confirmation engine *and* a discovery source, and the second job is the bigger one. Do not size it as an enrichment-only pass.
 - **The 4-page budget is not the binding constraint — 1.5 pages per domain is.** The crawl stops as soon as it has a confirmed number and an email, and most sites give both on the homepage. The budget is a ceiling that is rarely reached, so raising it would buy very little; the yield lever is the 39% of businesses that have a site at all, not the depth of the crawl.
-- **Yield varies enormously by city/category slice** — 45% of crawled Islamabad domains produced a confirmed number against 13% in Lahore, on the same code and the same category. The Islamabad salon set skews to clinics and spas with real websites. **Measure per slice; do not extrapolate one run's confirmation rate into the §13 "estimated available" figure.**
+- **Yield varies enormously by city/category slice** — 45% of crawled Islamabad domains produced a confirmed number against 13% in Lahore, on the same code and the same category. The Islamabad salon set skews to clinics and spas with real websites. **Measure per slice; do not extrapolate one run's confirmation rate into the §13 "estimated available" figure.** *(Third slice, Aug 2026: **Lahore × food, 7%** — 13 businesses with a confirmed number from 182 domains crawled. Two Lahore slices now bracket each other at 13% and 7% while Islamabad sits at 45%, so the Islamabad skew this bullet suspected is the better explanation than anything about Lahore. The rule stands and is now measured on three slices rather than two.)*
+
+- **Website fill is a category property, not a constant.** §14's "~30% have sites" was measured on salons and held at 32%. Food comes in at **49%** (210 of 429), and Lahore salons at 60% of a much smaller base. The website pass is therefore a bigger lever in food than the §14 table assumes — 182 domains crawled off 6 queries, against 62 off 3 for Islamabad salons.
+
+- **Restaurants publish a different kind of number, and it costs them qualification.** The food run's phone mix is **69% mobile / 19% landline / 12% UAN** against the salon run's 80/19/1. A twelvefold difference in UAN share is a real property of the vertical — restaurants publish reservation lines — and UANs carry no WhatsApp evidence, so food qualifies at **15%** against salon's 23–37% despite returning seven times the businesses. Volume and qualification move independently; §14's throughput table conflates them.
 - **Roughly one domain in five is dead** (21% / 23%). That is a normal, permanent property of PK SMB hosting, not a fault to chase, and it must not be allowed to look like a failure — see the breaker note below.
 
 **Two implementation traps, both found by running it.**
@@ -587,13 +591,37 @@ Consolidated procurement checklist. **Only one item is genuinely required.**
 
 | Dependency | Status | Used by | Notes |
 |---|---|---|---|
-| **PK residential proxy** | **Required** | Google Maps | Maps results are geo-ranked — a non-PK IP returns the wrong businesses entirely. This is a correctness issue, not an evasion one. Budget by GB; Maps panels are light, a full run is well under 1 GB |
+| **PK residential proxy** | **Required** — but see the measurement below | Google Maps | Maps results are geo-ranked — a non-PK IP returns the wrong businesses entirely. This is a correctness issue, not an evasion one. Budget by GB; Maps panels are light, a full run is well under 1 GB |
 | SERP API (Serper, ScraperAPI, Bing Web Search) | Optional | FB/IG Tier 2 (§6.3) | Only needed if you enable the social toggles. Priced per query; a run uses a few hundred |
 | Meta Graph API | Optional, free | FB/IG Tier 1 (§6.2) | No cost, but App Review takes weeks. Start the application at Phase 1 |
 | Google Maps Places API | **Not used** | — | Deliberate: pricing at this volume is prohibitive and per-request quotas cap the grid fan-out. The browser path is cheaper and less constrained |
 | Everything else | Free / self-hosted | Websites, directories, PakPlay, Turfy, Zameen, UrduPoint | Plain fetch or your own Playwright workers. No third-party cost |
 
 So a v1 running core sources only needs **one paid input: a PK residential proxy.** Add the SERP API only when you switch the FB/IG toggles on.
+
+**Note — measured on a direct connection, Aug 2026. "Returns the wrong businesses entirely" is stronger than the evidence supports, and the distinction changes what the proxy is for.**
+
+Six live Maps queries for Lahore × food, run with `PROXY_REQUIRED_SOURCES=""` from a non-PK IP, produced 429 unique businesses. Checked against geography rather than assumed:
+
+| Check | Result |
+|---|---|
+| Address names Lahore | **429 / 429** |
+| lat/lng inside the Lahore bounding box | **429 / 429** |
+| Phone numbers `+92` | **406 / 406** |
+| Landlines on Lahore's `042` area code | **63 / 63** |
+| Queries blocked or failed | **0 / 6** |
+
+The top rows are Nishat Hotel, English Tea House, Baranh and Ambarsariya — established Lahore restaurants carrying 3,800–18,000 reviews. **There is no wrong-country failure here at all.** The query string names the tile and the city, and Maps honours it.
+
+**The sharper evidence is that Lahore is not being suppressed relative to Islamabad.** The 45%-vs-13% WhatsApp gap invited the theory that a non-PK IP was degrading Lahore results. But Lahore × food returned **71.5 businesses per query against Islamabad × salon's 66.3** — Lahore out-yields Islamabad on the same connection the moment the category changes. A geo-ranking penalty that reverses when you ask about restaurants instead of salons is not a geo-ranking penalty.
+
+Adding the third enriched slice, the confirmation rates read **Islamabad × salon 45%, Lahore × salon 13%, Lahore × food 7%** (businesses with ≥1 confirmed number, as a share of domains crawled). Two Lahore slices bracket each other and Islamabad is the outlier — which is what §5.2 already suspected when it noted that "the Islamabad salon set skews to clinics and spas with real websites."
+
+**What this does and does not license.**
+
+- It **does** mean the existing data is good enough to run §16's validation pass on. The businesses are real, correctly located and correctly numbered; hand-checking 50 of them measures the scoring weights, which is what that pass is for.
+- It **does not** close the A/B. Nobody has run the same slice through a PK proxy, so whether a PK IP surfaces a *different or larger* set — ordering and completeness, not country — is still unmeasured. That question is now the proxy's only remaining job, and it is a tuning question rather than a correctness one.
+- The proxy therefore moves from **blocking** to **worth doing before scaling the fan-out**. Revise this row if the A/B ever shows a material difference.
 
 ---
 
@@ -697,6 +725,8 @@ Applied literally, tier 1 would have merged **11 Islamabad businesses and 7 Laho
 *Name similarity cannot see a segment split, and one live merge proved it.* The first real merge this stage produced was **"Lavish Women Salon DHA Branch" into "Lavish Men's Salon Dha Branch"** — same domain, **3 m apart**, token-set ratio **93.1**. That clears even the strict 88 threshold, because a single differing token barely moves the ratio in an otherwise identical name. They are two separately-staffed premises with a number each, and §4.2's own salon synonyms already list "men's salon" and "ladies salon" as different queries. So a merge is refused outright when both names declare a clientele and the declarations differ — men/gents/barber vs women/ladies vs kids (`textnorm.conflicting_segments`). It is checked *before* the ratio and it is deliberately conservative: it fires only when **both** names say something, so a barber shop beside an unlabelled salon is not a conflict. Across the six runs in the database it fires 4 times.
 
 *Within a run there is currently nothing left to merge.* Ingest already collapses on `place_id` at write time, and the cascade then produces **0 merges from 1,076 Islamabad candidate pairs and 41 Lahore ones**. That is the honest result, not a bug: this stage's value today is preventing bad merges, and its value for finding real ones is prospective — it arrives with the sources that do not share Maps' `place_id` (§5.3 directories, §5.4 verticals, §3.2 seed rows).
+
+> **Update — the first real merge, Aug 2026 (Lahore × food, 429 businesses).** At seven times the scale the cascade was tuned against, it found one: **"Utopian Chinese"**, merged on the `exact_phone` tier *with* the 150 m distance test, absorbing one duplicate row. The rejection counts are the part worth reading, because they are what the Phase 4 correction was for — from **936 fuzzy name-geo candidates, 110 exact-phone and 65 domain**, it rejected **935 on name similarity and 92 on distance** and merged exactly one. Applied as §10.1 originally specified, the phone and domain tiers alone would have merged well over a hundred rows on a category where shared reservation lines and restaurant groups are routine. The demotion of those tiers to corroboration holds up at scale, and the stage now has a real positive to its name rather than only a record of harm prevented.
 
 *One number can legitimately sit on two rows after a merge.* Each is a real provenance record with its own `source`/`source_url`, and folding them would drop whichever source lost — which is the input `source_agreement` counts. So the merge re-parents every contact row unchanged, and §3.3 ranking gives the export slot to one of them (see the §3.3 note). "Never discard a contact" is applied literally.
 
@@ -966,6 +996,8 @@ Minimal, three screens.
 | 66 / query | 20 / query | 19.5 / query |
 
 A **3.4× spread inside one category**. Any single multiplier is wrong for two of the three cities. Worse for anyone hoping to fit a curve: the two Lahore runs disagree in the *wrong direction* — 3 queries returned 60 unique and 6 queries returned 52 — so the data does not support a monotonic yield model, let alone a point estimate. Prior measured outcomes are therefore reported **unscaled**, with a caveat naming the query count they were measured at, because §14 also measured a 67% duplicate rate across near-synonyms: unique yield saturates rather than growing with the plan.
+
+> **Correction — Lahore × food, Aug 2026.** The table above is all one category, so it was read as a *city* effect. A live 6-query run of **Lahore × food returned 429 unique businesses — 71.5 per query**, which is **higher than Islamabad × salon's 66.3**. So the spread is at least as much a **category** effect as a city one: within Lahore alone, food out-yields salon **3.6×** (71.5 against 20), on one IP, one day, one codebase. The two axes are comparable in size and they compound. This does not weaken the refusal — it widens it. An estimate extrapolated from a slice differing in *either* city or category is unsupported, which is why `estimate_run` keys on the exact pair and nothing looser.
 
 **A second refusal, for a different reason.** Where a slice has prior runs that were never enriched, the business count is real but the *qualified* count is structurally 0 (§10.2: three discovery-only Lahore runs at 0 against the enriched one's 22). Publishing that 0 as a forecast would read as "this city has no leads" rather than "that run was not finished", so it is withheld and the reason is stated.
 
