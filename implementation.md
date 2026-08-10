@@ -142,6 +142,12 @@ This controls **ranking**, not filtering (except `whatsapp_only`).
 | `business_first` | main business line → mobile w/ WA confirmed → named-person → landline |
 | `whatsapp_only` | filter out everything without WhatsApp evidence, then rank by confidence |
 
+**Note — Phase 4.** Implemented in `core/ranking.py`, written onto `contacts.rank`. Three things the table above leaves open:
+
+- **"Main business line" cannot mean "not a mobile"**, because the same row of the table puts plain `landline` in `business_first`'s *bottom* tier. It is read as the number the business publishes as its own: a UAN, which exists for no other purpose, or the number on its own Maps listing, which the business itself registered. Landlines found elsewhere fall through to the residual tier.
+- **The `whatsapp_only` filter is expressed as `rank = NULL`, never as a delete.** §10.1 says never discard a contact and §15 needs the row for provenance, so an excluded number keeps its row and only loses its export slot — switching the preference back is lossless. The filter keeps the `likely` band: §9.3 scores a bare `03xx` at 0.60 precisely because a PK mobile probably does take WhatsApp, and restricting it to `confirmed` would cut the Islamabad run from 256 numbers to 53 and read to the operator as a broken run rather than as a filter they chose.
+- **A number takes at most one ranked slot.** After a §10.1 merge the same E.164 can sit on two rows of one business, each a real provenance record. The better-evidenced row wins the slot and its duplicate goes unranked, so §12.1 never shows the operator the same number as both `phone_1` and `phone_2`.
+
 ---
 
 ## 4. Category taxonomy and source routing
@@ -655,6 +661,32 @@ Export the label, not the raw score, in the user-facing table.
 
 Merge strategy: keep the highest-confidence value per field, **union all contacts**, union all `source_urls`. Never discard a contact during merge — a second number is a second column, and that's exactly what you asked for.
 
+**Note — revised by measurement, Aug 2026 (Phase 4).** Built as `services/dedupe.py` and run against both enriched runs. Two of the four tiers above are destructive as written, and the correction is one line: **`place_id` merges on its own; every other tier must also pass the 150 m distance test.**
+
+*Scope: within one run.* The section does not say, so this is a decision. A `businesses` row belongs to exactly one run (`run_id NOT NULL`), so a cross-run merge has nowhere to put the survivor — whichever run owned it would be claiming a business the other one found, destroying the record §16's "validate by re-running" depends on. And `place_id` is unique *per run* precisely so a run can be repeated. Measured on the four Lahore × salon runs in the database: **232 place_ids collapse to 72, and three of the four overlap 100% with each other.** A cross-run merge would not be deduplicating a table, it would be deleting three runs. The operator's real want — one table, not four — is a **read-side** concern for Phase 5: the results view can union runs and collapse on `place_id` at query time without destroying anything.
+
+*Tier 1 (exact phone) and tier 4 (domain) merge chains into single rows.* Across both runs, **36 groups of businesses share a phone number and 7 share a domain, and not one of them is a duplicate:**
+
+| Shared key | Businesses | Apart | What it actually is |
+|---|---|---|---|
+| 7 numbers + `houseofsalons.pk` | 3 | 171 m – 5.4 km | House of Salons F-7 Female, F-7 Men's, F-10 |
+| 9 numbers + `royli.com` | 2 | 8.1 km | Royli Salon, two Islamabad branches |
+| 7 numbers + `cosmosalon.pk` | 2 | 4.9 km | COSMO Salon, Gulberg and DHA |
+| 4 numbers + `shelbysandco.com` | 2 | 13.3 km | Shelby's & Co., Johar Town and DHA |
+| 2 numbers + `bellacaresalon.com.pk` | 2 | 10.1 km | Bella Care, Johar Town and Gulberg |
+| 1 mobile | 2 | 40 m | Naveeds Salon and Nauman's Hair Saloon — unrelated |
+| 1 mobile | 2 | 16 m | Spanish Club and a massage centre, same mall — unrelated |
+
+Applied literally, tier 1 would have merged **11 Islamabad businesses and 7 Lahore ones** out of existence, each one a contactable branch with its own address. This is §10.1's own warning about false merges, arriving through the tier the section lists *first*.
+
+*The distance test is the term carrying the discrimination.* Within 150 m, the highest name similarity between businesses sharing a number is **54.5** (Naveeds / Nauman's) and all such pairs are distinct businesses. Beyond 150 m, several score ≥ 88 (COSMO 100.0, Huma's 90.0, Bella Care 89.7) and every one of them is a separate branch. So phone and domain become **corroborating evidence that lowers the name bar** — `dedupe_corroborated_threshold`, default 75, which clears the measured 54.5 ceiling with room — and never waive the geo test. Tier 3 is unchanged and correct as specified.
+
+*Name similarity cannot see a segment split, and one live merge proved it.* The first real merge this stage produced was **"Lavish Women Salon DHA Branch" into "Lavish Men's Salon Dha Branch"** — same domain, **3 m apart**, token-set ratio **93.1**. That clears even the strict 88 threshold, because a single differing token barely moves the ratio in an otherwise identical name. They are two separately-staffed premises with a number each, and §4.2's own salon synonyms already list "men's salon" and "ladies salon" as different queries. So a merge is refused outright when both names declare a clientele and the declarations differ — men/gents/barber vs women/ladies vs kids (`textnorm.conflicting_segments`). It is checked *before* the ratio and it is deliberately conservative: it fires only when **both** names say something, so a barber shop beside an unlabelled salon is not a conflict. Across the six runs in the database it fires 4 times.
+
+*Within a run there is currently nothing left to merge.* Ingest already collapses on `place_id` at write time, and the cascade then produces **0 merges from 1,076 Islamabad candidate pairs and 41 Lahore ones**. That is the honest result, not a bug: this stage's value today is preventing bad merges, and its value for finding real ones is prospective — it arrives with the sources that do not share Maps' `place_id` (§5.3 directories, §5.4 verticals, §3.2 seed rows).
+
+*One number can legitimately sit on two rows after a merge.* Each is a real provenance record with its own `source`/`source_url`, and folding them would drop whichever source lost — which is the input `source_agreement` counts. So the merge re-parents every contact row unchanged, and §3.3 ranking gives the export slot to one of them (see the §3.3 note). "Never discard a contact" is applied literally.
+
 ### 10.2 Lead score (0–100)
 
 ```
@@ -667,6 +699,51 @@ score =  30 × whatsapp_evidence          (0–1)
 ```
 
 Default the table sort to `lead_score DESC`. "Good quality lead" = score ≥ 60 **and** at least one mobile. Report both raw and qualified counts in the run summary.
+
+**Note — measured, Aug 2026 (Phase 4).** Built as `core/scoring.py` (pure) and `services/scoring.py` (Stage 5), and run against both enriched runs. The weights are unchanged; what needed deciding was how each term behaves when its input is absent, which §5.1 had already flagged as load-bearing and which turned out to be more load-bearing than expected.
+
+**Missing is not zero, and the line runs between two kinds of missing.** A term is *omitted* — dropped from the numerator **and the denominator**, with the score renormalised over the weight that actually applied — when the underlying fact plainly exists and only our observation of it failed. A term is *scored 0* when "we found nothing" is itself a true statement about the record.
+
+| Term | When absent | Why |
+|---|---|---|
+| `business_signal` | **Omitted** | Every business has some real level of popularity; Maps declining to publish it is our gap |
+| `person_attribution` | **Scored 0** | Most PK SMB salons genuinely have no publicly named owner — that is a fact about the record, not a hole in it |
+| `whatsapp_evidence`, `contact_confidence` | **Scored 0** | We looked and found no contact. 25 of the 199 Islamabad businesses are in this state and they are correctly bad leads |
+
+**Omission is partial where the inputs are, and getting this wrong inverts §5.1's bias rather than removing it.** `business_signal` has two inputs that go missing independently: `review_count` is present on 80% of the Islamabad run and **0% of the Lahore one**. Scoring the gap as zero reviews would have sunk the entire Lahore run, exactly as §5.1 warned. But scoring rating alone at *full* weight overshoots the other way, because PK salon ratings cluster hard at the top (Islamabad median 4.6, p90 5.0 — so rating alone normalises to ~0.90) while review counts spread widely (median 31 → ~0.65, so rating-and-reviews normalises to ~0.78). Measured: at full weight the Lahore run's mean score came out **1.8 points above** where the same businesses belong. So one input present carries **half** the term's weight and the rest renormalises away. The two runs then agree to within a point on comparable rows.
+
+The corollary is worth stating on its own: **`rating` barely discriminates, and `review_count` carries nearly all of `business_signal`.** A run that arrives without review counts has lost most of that term's value, and no weighting recovers it. That is a §5.1 payload-richness problem, not a scoring one.
+
+**`completeness` must not price in the shape of the market.** Defined as the populated ratio of four fields — `address`, an online presence, an email, a second distinct number — chosen against measured fill rates. Two consequences:
+
+- **Having a website is deliberately not one of them.** Only 32% of discovered businesses have one; scoring it directly would dock two thirds of every run for a property of PK SMB hosting. It sits inside a disjunction with the Facebook and Instagram columns, so a salon reachable only on Instagram scores the same as one with a domain.
+- `area` (100% filled) and lat/lng (100%) are excluded. A field that is always present adds a constant to every row and buys no discrimination.
+
+**`source_agreement` is counted per business, not per number.** §5.2 measured that only 19 of 53 confirmed numbers were ones Maps also carried, so per-number agreement is too rare to be a signal. Per business it is real: **43 of 199 Islamabad and 21 of 60 Lahore** businesses carry contacts from both `google_maps` and `business_website`.
+
+**The practical ceiling is 85, and the run says so.** §8's attribution engine is Phase 9, so the 15-point person term is 0 for all but **1 business in 199**. The other five weights are *not* inflated to compensate: every §16 weight tuned against an inflated scale would have to be re-tuned the day Phase 9 lands. Instead each run reports `unattributed_ceiling: 85` so nobody reads a table that stops at 85 as a fact about the businesses.
+
+**Measured output.** Both runs, `owner_first`:
+
+| | Islamabad × salon | Lahore × salon |
+|---|---|---|
+| Businesses scored | 199 | 60 |
+| Mean / median score | 46.4 / 49 | 54.3 / 51 |
+| p10 / p90 / max | 9 / 80 / 97 | 32 / 72 / 82 |
+| Mean, businesses with a phone | 51.9 | 54.3 |
+| Mean, businesses with a `confirmed` number | 79.5 | 78.2 |
+| **Qualified (≥ 60 + a mobile)** | **45 (23%)** | **22 (37%)** |
+
+Two things to read from this. The cross-run mean gap is almost entirely the 25 Islamabad businesses with no phone at all (p10 of 9 against Lahore's 32); conditioned on being contactable the runs are 2.4 points apart. And **`confirmed`-WhatsApp businesses land at ~79 in both runs independently**, which is the check that the scale means the same thing across slices — it is what makes §16's weight tuning transferable.
+
+**Scoring also prices §5.2, and the number is stark.** The database holds three Lahore × salon runs that were discovered but never enriched, alongside the one that was. Same city, same category, same discovery code:
+
+| Lahore × salon | Businesses | Mean score | **Qualified** |
+|---|---|---|---|
+| Discovery only ×3 | 52–60 | 46.4 – 48.2 | **0, 0, 0** |
+| Discovery + §5.2 enrichment | 60 | 54.3 | **22** |
+
+A discovery-only run produces **no qualified leads at all**, because every number in it is a §9.3 *likely* at 0.60 and nothing else in the record can lift a business over 60. That is not a scoring artefact — it is the honest statement that a Maps listing alone is not a qualified lead. It also means §16's "ship after Phase 5" bundle is doing the right work: Stage 2 is not a 10% uplift on this scale, it is the difference between a table and an empty filter.
 
 ---
 
@@ -885,6 +962,8 @@ Worked example — **Lahore × salon**, core sources only:
 | **Qualified (score ≥ 60 + mobile)** | **~380** | **~31 min** |
 
 > **Revised Aug 2026.** This table previously budgeted 700 detail-panel interactions at 28 minutes, giving ~57 min per run. Phones are already in the search payload (§5.1), so panels are now a fallback for the ~13% of records without one rather than the main path. The old 28-minute figure also silently assumed ~4 parallel browser workers to reconcile with §5.1's stated 200–500 businesses/hour *per browser*; on a single worker it would have been closer to two hours.
+
+> **Qualified rate measured, Aug 2026 (Phase 4) — and the table's last row is optimistic.** This table projects ~380 qualified from ~600 with a phone, a **63%** conversion. Scored against the real runs (§10.2's note), the actual rate is **26%** of contactable Islamabad businesses and **37%** of Lahore's. Two caveats before this is treated as a shortfall: §8's attribution engine is Phase 9, so every row is scored against an 85-point ceiling rather than 100, and the ≥ 60 bar was never calibrated against ground truth — that is precisely what §16's validation pass is for. The honest reading today is that **the constraint on a run's output is the qualification rate, not the volume**: 199 businesses from 3 queries already clears the raw target, and 45 of them qualify. Re-check this row after §16's hand-check, and re-tune the bar or the weights rather than the fan-out.
 
 > **Website row confirmed, Aug 2026 (Phase 3).** The "~30% have sites" assumption in that row is the one figure in this table that has now been measured end to end, and it holds: **32%** of the 199 discovered Islamabad businesses carry a real website (39% carry any URL, the rest being FB/IG profiles that route to §6). Note this *contradicts* the ~85% website fill §5.1 used to claim — see the correction there; the 85% was a first-page sample. Crawl depth came in at **1.5 pages per domain** against the 4-page budget, so the 8-minute estimate has headroom rather than risk.
 

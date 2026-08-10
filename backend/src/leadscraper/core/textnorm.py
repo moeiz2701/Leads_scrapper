@@ -42,6 +42,42 @@ def normalise_name(name: str) -> str:
     return text
 
 
+# Tokens that name *which* clientele a branch serves. Mutually exclusive across
+# groups: a men's salon and a women's salon are two businesses even at one
+# address, with their own staff, their own hours and their own number.
+#
+# This exists because token-set ratio cannot see the difference. "Lavish Women
+# Salon DHA Branch" and "Lavish Men's Salon Dha Branch" — same domain, 3 m apart,
+# in the live Karachi run — score **93.1**, comfortably past §10.1's 88, because
+# a single differing token barely moves the ratio in an otherwise identical name.
+# §4.2's own salon synonym list carries "men's salon" and "ladies salon"
+# separately, so this distinction is one the pipeline already knows it makes.
+_SEGMENT_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"men", "mens", "gents", "gent", "male", "males", "boys", "barber", "barbers"}),
+    frozenset({"women", "womens", "ladies", "lady", "female", "females", "girls"}),
+    frozenset({"kids", "kid", "children", "child", "baby"}),
+)
+
+
+def conflicting_segments(left_norm: str, right_norm: str) -> bool:
+    """True when two normalised names describe different clienteles.
+
+    Conservative on purpose: it only fires when **both** names carry a segment
+    token and those tokens come from different groups. A barber shop next to an
+    unlabelled salon is not a conflict, because only one of them said anything.
+    """
+    left_groups = _segments(left_norm)
+    right_groups = _segments(right_norm)
+    if not left_groups or not right_groups:
+        return False
+    return bool(left_groups ^ right_groups)
+
+
+def _segments(name_norm: str) -> set[int]:
+    tokens = set(name_norm.split())
+    return {i for i, group in enumerate(_SEGMENT_GROUPS) if tokens & group}
+
+
 def registrable_domain(url: str) -> str | None:
     """Host without ``www``. §10.1's domain-match dedupe key.
 

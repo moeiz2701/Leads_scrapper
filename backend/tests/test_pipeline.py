@@ -44,14 +44,21 @@ def test_stage_registry_is_declared_not_probed() -> None:
     Phase 2 gave Stage 1 a body; Phase 3 gives Stage 2 the §5.2 website module.
     Stage 2's other inputs (the Maps detail-panel fallback, §5.3 directories)
     join that body later rather than replacing it, so the flag flips here once.
+    Phase 4 adds Stages 5 and 6 — §10.2 scoring with §3.3 ranking, and the §10.1
+    dedupe cascade. Stage 6's export half is Phase 5 and joins the same body.
     """
-    assert implemented_stages() == [Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT]
+    assert implemented_stages() == [
+        Stage.DISCOVERY,
+        Stage.CONTACT_ENRICHMENT,
+        Stage.NORMALISE_SCORE,
+        Stage.DEDUPE_EXPORT,
+    ]
     assert not set(implemented_stages()) & set(missing_stages())
     assert set(implemented_stages()) | set(missing_stages()) == set(Stage)
 
 
 @requires_db
-@pytest.mark.parametrize("stage", [Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT])
+@pytest.mark.parametrize("stage", implemented_stages())
 def test_a_missing_run_fails_loudly(stage: Stage) -> None:
     """An implemented stage handed a nonexistent run must raise, not return a
     zero-count StageResult that reads like a successful empty run.

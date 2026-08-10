@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     cache_ttl_listing_days: int = 7
     cache_ttl_detail_days: int = 30
     dedupe_fuzzy_threshold: int = Field(default=88, ge=50, le=100)
+    # §10.1's phone and domain tiers, demoted to corroboration — a shared number
+    # or a shared domain lowers the name bar but never waives the 150 m test.
+    # Measured floor: among businesses within 150 m that share a number, the
+    # highest name similarity is 54.5 and none of them are duplicates, so this
+    # must stay comfortably above that. See the §10.1 note and test_dedupe.py.
+    dedupe_corroborated_threshold: int = Field(default=75, ge=50, le=100)
 
     # §6.6 — hard caps for the social module.
     social_requests_per_business: int = 1

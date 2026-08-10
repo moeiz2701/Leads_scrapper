@@ -90,18 +90,31 @@ def stage_person_attribution(run_id: uuid.UUID) -> StageResult:
 
 
 def stage_normalise_score(run_id: uuid.UUID) -> StageResult:
-    """Stage 5 — E.164, WhatsApp evidence, lead score.
+    """Stage 5 — E.164, WhatsApp evidence, lead score (§10.2), rank (§3.3).
 
-    The §9 primitives this stage depends on (phone parsing, classification,
-    evidence scoring) are already built and tested; only the DB-walking wrapper
-    is outstanding.
+    Scores are renormalised over the terms whose inputs the source published, so
+    a business whose Maps payload omitted ``review_count`` is scored on what is
+    known rather than docked for what is missing (§5.1).
+
+    §8's attribution engine is Phase 9, so the 15-point person term is 0 for
+    almost every row today and the practical ceiling is 85. The stage reports
+    that as ``score_ceiling`` rather than inflating the other weights to hide it.
     """
-    raise StageNotImplementedError(Stage.NORMALISE_SCORE, "Phase 4")
+    from leadscraper.services.scoring import run_normalise_score
+
+    return run_normalise_score(run_id)
 
 
 def stage_dedupe_export(run_id: uuid.UUID) -> StageResult:
-    """Stage 6 — §10.1 dedupe cascade, merge, rank, export."""
-    raise StageNotImplementedError(Stage.DEDUPE_EXPORT, "Phase 4–5")
+    """Stage 6 — §10.1 dedupe cascade and merge. Export is Phase 5.
+
+    Scoped to one run, and every tier except ``place_id`` must also pass §10.1's
+    150 m distance test — applied literally, the phone and domain tiers merge
+    each multi-branch chain into a single row. See ``services/dedupe``.
+    """
+    from leadscraper.services.dedupe import run_dedupe
+
+    return run_dedupe(run_id)
 
 
 STAGE_FUNCTIONS = {
@@ -119,7 +132,12 @@ STAGE_FUNCTIONS = {
 # work that can only fail. Deliberately a declared list, not something probed by
 # calling the functions — probing a stage means running it.
 IMPLEMENTED_STAGES: frozenset[Stage] = frozenset(
-    {Stage.DISCOVERY, Stage.CONTACT_ENRICHMENT}
+    {
+        Stage.DISCOVERY,
+        Stage.CONTACT_ENRICHMENT,
+        Stage.NORMALISE_SCORE,
+        Stage.DEDUPE_EXPORT,
+    }
 )
 
 
