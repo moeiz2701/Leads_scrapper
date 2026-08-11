@@ -391,6 +391,46 @@ Four things worth acting on:
 
 **Coverage warning — set expectations correctly.** BusinessList.pk is broad but shallow: 346 restaurants nationally, but only **18 beauty salons in Lahore**. These directories are a corroboration and cross-check layer, **not** a volume driver. Google Maps carries the run.
 
+**Note — built and measured, Aug 2026 (Phase 6). The coverage warning above is exactly right and still understates the problem. This layer was built, it works, and it yields nothing.** Modules: `sources/businesslist.py`, `services/directories.py`, `scripts/spike_directories.py`, `scripts/run_directories.py`.
+
+**Three of the four sources in the table above are refused**, on measurement rather than on the table's prose. Each is recorded in `taxonomy.EXCLUDED_SOURCES` with its reason, the way §4.1's exclusions are, so nobody re-adds one without reading why:
+
+| Source | What recon found |
+|---|---|
+| **UrduPoint** | The table's "clean field table (`Mob #`), mostly `03xx`" with an owner-name field does not describe what it serves. Sampled over the **21** Lahore restaurant records its directory actually holds: **4% carry a mobile, 85% a landline, 0% an owner name.** §9.3 scores a landline 0.00 and §10.2 requires a mobile to qualify, so it cannot produce a qualified lead. It also costs **one request and 171 KB per business** — its listing pages carry no phone at all — against BusinessList's ~2.5 KB. Its taxonomy is industrial ("wool", "neon sign mfrs", "packing and crating") and contains **no salon or beauty category in any city** |
+| **BusinessBook.pk** | Never reaches the point of needing the browser §5.3 warns about: `/category/{slug}-{id}` answers **500**, and the root alternates between a 73 KB body and an empty one across consecutive requests. An unstable source does not earn the Playwright dependency |
+| **YellowPage.pk** | The table's own verdict — "low quality, high duplication" — plus a 670 KB category index whose listings are not in the served HTML |
+| **listing.com.pk** | Serves a Cloudflare interstitial on every path including the root. That is an access control, and §5.5 draws the line there: automate interactions with public data, never automate past one |
+
+**BusinessList.pk is richer than this section says, and that is what made it worth trying.** The section says "phones in plain text" and does not say *where*. They are on the **listing** page, alongside the address, rating, review count, a stable `data-cmpid`, and — the reason to build it at all — **latitude and longitude** in `div.mapmarker[data-ltd][data-lng]`. So a category page is ~20 complete businesses for one request, no detail fetch is needed for any field §12.1 exports, and §10.1's tier 3 has coordinates on both sides for the first time. Measured over 58 listings: **84% carry a phone, 65% coordinates**, line mix **55% mobile / 40% landline / 4% UAN**. Pagination is a `<link rel="next">`; `robots.txt` disallows only `/admin/`, `/edit/*`, `/sign-in/*` and the search helpers, and permits `/category/*` and `/company/*` outright.
+
+**Where directories enter, decided: Stage 2, after the website pass.** §2 lists them under both discovery and contact enrichment and does not choose. The coverage numbers choose for it — 59 restaurants and 18 beauty salons in the whole of Lahore against Maps' 429 and 60 for the same slices — so as discovery this is a rounding error, while as a second opinion on businesses Maps already found it would (in principle) feed §10.2's `source_agreement`, the one term that no run without websites can currently earn. It runs *after* §5.2 so that the website's stronger evidence is already recorded when the directory's bare number arrives and the upgrade-only rule has something to refuse to overwrite. Stage 2 now has two independent inputs and reports them separately in `runs.stats`; `planned_stages` schedules the stage if *either* flag is set.
+
+**The category taxonomy is self-assigned by the businesses that submit the listing, so a slug's name is not evidence of its contents.** This cost a full measurement cycle before it was noticed. `food-retailers` sounds like restaurants and holds **854** listings of groceries, mineral-water plants and B2B wholesale — Erie Mineral Water, Faysal Karyana Store, Skylark Engineering. `textile` (1,842) is fabric mills, not §4.2's fashion retail. The 18-listing `beauty-salons` figure this section quotes contains **`Bigbasket.pk`, a grocery site** — one business appears in `beauty-salons`, `catering` and `food-retailers` at once. Five further plausible slugs (`food-drink`, `health-beauty`, `property`, `computers-internet`, `entertainment-media`) are parent *index* pages carrying no businesses at all. Every slug in `CATEGORY_SLUGS` was opened and read before it was added; `scripts/spike_directories.py --categories` re-runs the audit.
+
+**The result, over four live slices. This is the finding.**
+
+| Slice | Maps businesses | Directory listings | Matched | **Contacts added** |
+|---|---|---|---|---|
+| Lahore × food | 428 | 97 | 3 | **0** |
+| Islamabad × salon | 199 | 35 | 2 | **0** |
+| Lahore × salon | 60 | 109 | 1 | **0** |
+| Karachi × salon | 39 | 92 | 1 | **0** |
+| **Total** | **726** | **333** | **7 (2.1%)** | **0** |
+
+Zero contacts added, zero businesses corroborated, zero fields gap-filled. Two structural reasons, and neither is a tuning problem:
+
+- **The tiers that fire all require a shared phone, so a match is by construction a number we already had.** `corroborated_geo` and `phone_unlocated` both need an exact phone match — the first to lower the name bar, the second because it is the only evidence available without coordinates. The one tier that can match a business whose numbers we *don't* share is `fuzzy_name_geo`, and it produced **0 matches in 333 listings**.
+- **BusinessList publishes geocoded approximations, not surveyed positions.** That is why tier 3 never fires. Matching on name alone and then measuring the distance: "Dilara's Salon" ↔ "Dilara Salon" are **391 m** apart, "HairSense" ↔ "HairSense (Men's Hair Salon Islamabad)" **247 m**, one Lahore pair **13,196 km**. §10.1's 150 m radius was calibrated Maps-against-Maps, where both sides come from one surveyed source; across sources with different coordinate provenance it is too tight.
+
+**Widening the radius was tested and rejected on the numbers.** At 500 m the two richest slices admit five name-matched pairs. Four add nothing — the directory's number is one Maps already has, or the row has no number. The fifth adds a number, and it is a **false match**: "Hair and Hair" ↔ "Ashley's Hair and Makeup Studio", 329 m apart, which token-set ratio scores ≥ 88 because the short name is a subset of the long one. So widening buys **zero correct contacts and one incorrect one**. 150 m stays, and it stays for a measured reason rather than an inherited one.
+
+**Treating unmatched rows as discovery was tested and rejected too.** §5.3's other reading — a thin discovery source where Maps is weak — got its best case: Karachi × salon, only 39 Maps businesses and 0 qualified. Inserting all 91 unmatched listings produced businesses with a **mean score of 26.7 against the Maps rows' 42.3, a maximum of 45, and not one qualified lead**; 20 of the 91 had no phone at all. This is §10.2's discovery-only finding restated — a bare number is not a qualified lead, whatever publishes it. The behaviour exists behind `DIRECTORY_INSERT_UNMATCHED`, off by default, and the run was restored to its 39 rows afterwards.
+
+**Disposition: built, tested, and defaulted off.** §3 lists directories as "core, default on"; that is now `False` in `SourceFlags`, because a source that is on by default and always contributes zero is §5.5's failure mode wearing a toggle. The run-create endpoint states the measurement rather than an adjective. The module is kept rather than deleted: it is correct, it is cheap (6–9 requests), the finding is reproducible, and the next contributor who reads "directories are a corroboration layer" in this section needs the numbers that say what that is worth.
+
+**What this predicts about Phase 7, and it is the useful part.** The failure is entirely a *join* failure — the directory holds real Lahore restaurants (Cafe Zouk, Butt Karahi, Texas Chicken) that this Maps run never surfaced, and we cannot safely attach any of them. §5.4's PakPlay does not have this problem **by construction**: it embeds the Google Maps `place_id` in its venue-page map iframe, which is §10.1's tier 2 — an identity assertion that merges on its own, with no name ratio and no distance test involved. Phase 6's result is therefore an argument *for* Phase 7 rather than against more sources: the constraint is joinability, and PakPlay is the one remaining source that ships its own join key.
+
 ---
 
 ### 5.4 Vertical modules
@@ -725,6 +765,14 @@ Applied literally, tier 1 would have merged **11 Islamabad businesses and 7 Laho
 *Name similarity cannot see a segment split, and one live merge proved it.* The first real merge this stage produced was **"Lavish Women Salon DHA Branch" into "Lavish Men's Salon Dha Branch"** — same domain, **3 m apart**, token-set ratio **93.1**. That clears even the strict 88 threshold, because a single differing token barely moves the ratio in an otherwise identical name. They are two separately-staffed premises with a number each, and §4.2's own salon synonyms already list "men's salon" and "ladies salon" as different queries. So a merge is refused outright when both names declare a clientele and the declarations differ — men/gents/barber vs women/ladies vs kids (`textnorm.conflicting_segments`). It is checked *before* the ratio and it is deliberately conservative: it fires only when **both** names say something, so a barber shop beside an unlabelled salon is not a conflict. Across the six runs in the database it fires 4 times.
 
 *Within a run there is currently nothing left to merge.* Ingest already collapses on `place_id` at write time, and the cascade then produces **0 merges from 1,076 Islamabad candidate pairs and 41 Lahore ones**. That is the honest result, not a bug: this stage's value today is preventing bad merges, and its value for finding real ones is prospective — it arrives with the sources that do not share Maps' `place_id` (§5.3 directories, §5.4 verticals, §3.2 seed rows).
+
+> **Update — the fuzzy tier's prospective value arrived, and it was zero. Aug 2026 (Phase 6).** The paragraph above says tier 3's value for *finding* duplicates "arrives with the sources that do not share Maps' `place_id` (§5.3 directories, §5.4 verticals, §3.2 seed rows)". §5.3's directories arrived. Over **333 BusinessList listings against 726 businesses in four slices, `fuzzy_name_geo` matched 0.**
+>
+> The tier is not mis-tuned; the input is. **BusinessList publishes geocoded approximations rather than surveyed positions**, so its coordinates miss by hundreds of metres routinely and by thousands of kilometres occasionally — "Dilara's Salon" and "Dilara Salon" are the same business 391 m apart. The 150 m radius in tier 3 was calibrated Maps-against-Maps, where both sides come from *one* source's survey. Across sources with different coordinate provenance it is measuring their disagreement about where a business is, not the distance between two businesses.
+>
+> **Widening it was tested and does not help** — at 500 m the extra recall is one pair, and that pair is a false match ("Hair and Hair" against "Ashley's Hair and Makeup Studio", which clears 88 because a short name is a token-subset of a long one). The §5.3 note has the full table. The threshold stays at 150 m.
+>
+> The generalisable rule: **a distance test is only as good as the worse of the two coordinate sources**, and a cross-source join should say which source it trusts for position. Where a source ships Maps' own `place_id` — §5.4's PakPlay embeds it in the venue-page iframe — tier 2 applies and none of this arises.
 
 > **Update — the first real merge, Aug 2026 (Lahore × food, 429 businesses).** At seven times the scale the cascade was tuned against, it found one: **"Utopian Chinese"**, merged on the `exact_phone` tier *with* the 150 m distance test, absorbing one duplicate row. The rejection counts are the part worth reading, because they are what the Phase 4 correction was for — from **936 fuzzy name-geo candidates, 110 exact-phone and 65 domain**, it rejected **935 on name similarity and 92 on distance** and merged exactly one. Applied as §10.1 originally specified, the phone and domain tiers alone would have merged well over a hundred rows on a category where shared reservation lines and restaurant groups are routine. The demotion of those tiers to corroboration holds up at scale, and the stage now has a real positive to its name rather than only a record of harm prevented.
 
@@ -1115,7 +1163,7 @@ Comfortably inside the "few hundred good-quality leads" target for broad categor
 | **3** | Website module (wa.me, widgets, tel:, JSON-LD) | 2–3 d |
 | **4** | Dedupe + scoring + ranking by `number_preference` | 2–3 d |
 | **5** ✅ | Frontend: run form, progress, table, CSV export | 4–5 d |
-| **6** | Directory modules (BusinessList, UrduPoint) | 2–3 d |
+| **6** ✅ | Directory modules (BusinessList, UrduPoint) — **built; measured at zero yield, see §5.3** | 2–3 d |
 | **7** | Vertical modules (PakPlay, Turfy, Zameen click-reveal, Foodpanda) | 4–5 d |
 | **8** | FB/IG Tiers 2–3 (SERP + bio-link follow) | 3–4 d |
 | **9** | Person attribution engine | 3–4 d |
@@ -1130,6 +1178,10 @@ The "4–5 d" estimate was for **four separate deliverables plus two**, and the 
 **What Phase 5 does not include.** §3.2's seed mode is still unimplemented and still unassigned to a phase, though §13 Screen 1 is now where it would surface. The §5.1 Maps detail-panel fallback for the ~13% of records with no phone in the payload is still unbuilt. Directories are accepted on the run form and warned about rather than refused, because they are additive to a Maps run — but they contribute nothing until Phase 6.
 
 **The §16 validation pass below is now the immediate next thing, and the exporter is how you produce its sample.** A 50-row hand-check sample comes straight out of `GET /api/runs/{id}/export.csv`.
+
+**Note — Phase 6 complete, Aug 2026, and it is the first phase that shipped a negative result.** §5.3's horizontal directories are built (`sources/businesslist.py`, `services/directories.py`) and measured across four live slices at **7 matches from 333 listings and 0 contacts added**. Three of §5.3's four sources were refused on recon and recorded in `taxonomy.EXCLUDED_SOURCES` — including **UrduPoint, which this table names in the Phase 6 row**: it holds 4% mobiles and 0% owner names over its 21 Lahore restaurant records, at 171 KB and one request each. So the row above is delivered, and what it delivered is the knowledge that this branch is not worth extending. §5.3 carries the full measurement and the two rejected remedies (widening the geo radius; inserting unmatched rows as discovery).
+
+**The ordering question this raises, stated plainly.** §16's phase table puts directories at 6 and verticals at 7, and this section's "Validation before scaling" says to tune the weights against ground truth *before* building more source modules. Phase 6 was built ahead of that validation and returned nothing — which is weak evidence for the validation-first argument, and strong evidence for a narrower claim: **the binding constraint on a new source is whether its records can be joined to the ones we have.** Directories fail on the join, not on the data. §5.4's PakPlay ships Maps' own `place_id` in its venue-page iframe, so it joins through §10.1's tier 2 with no name ratio and no distance test. That is the property to select for when choosing what to build next.
 
 ### Validation before scaling
 

@@ -11,8 +11,8 @@ ignoring it.
 
 ## Status
 
-Phases 1–5 of the §16 build order are complete. **§16's ship gate is reached.**
-Phases 6–10 are outstanding.
+Phases 1–6 of the §16 build order are complete. **§16's ship gate is reached.**
+Phases 7–10 are outstanding.
 
 | | |
 |---|---|
@@ -21,7 +21,42 @@ Phases 6–10 are outstanding.
 | ✅ Phase 3 | Business website module — wa.me, chat widgets, `tel:`, JSON-LD, emails, socials; 4-page crawl budget, no browser |
 | ✅ Phase 4 | §10.2 lead scoring, §3.3 ranking by `number_preference`, §10.1 dedupe cascade |
 | ✅ Phase 5 | §12 CSV export, FastAPI, the §2 queue given producers + a worker, §13's three screens + Settings, §15 suppression + bulk delete, §10.1's cross-run union |
+| ✅ Phase 6 | §5.3 horizontal directories — BusinessList.pk built, three sources refused on recon. **Measured at zero yield; defaulted off** ([§5.3](implementation.md)) |
 | ⬜ Next | **§16 validation pass — needs a human.** Hand-check 50 rows, then tune the weights |
+
+### Phase 6 shipped a negative result, and that is the deliverable
+
+The §5.3 directory layer is built, tested and correct, and across four live
+slices it added **nothing**:
+
+| Slice | Maps businesses | Directory listings | Matched | Contacts added |
+|---|---|---|---|---|
+| Lahore × food | 428 | 97 | 3 | **0** |
+| Islamabad × salon | 199 | 35 | 2 | **0** |
+| Lahore × salon | 60 | 109 | 1 | **0** |
+| Karachi × salon | 39 | 92 | 1 | **0** |
+
+The failure is a **join** failure, not a data failure. BusinessList holds real
+Lahore restaurants this Maps run never surfaced — Cafe Zouk, Butt Karahi, Texas
+Chicken — and none of them can be safely attached, because the directory
+publishes *geocoded approximations* rather than surveyed positions. "Dilara's
+Salon" and "Dilara Salon" are the same business **391 m** apart; one Lahore pair
+is 13,196 km apart. §10.1's 150 m radius was calibrated Maps-against-Maps, where
+both sides come from one survey. Widening it to 500 m was tested: it buys **zero
+correct contacts and one incorrect one**. Inserting the unmatched rows as
+discovery was tested too — 91 rows into Karachi × salon, **max score 45, zero
+qualified**.
+
+So `directories` now defaults **off**, and the run form says what was measured
+instead of promising a source that will not deliver. The module is kept because
+the finding is reproducible and the next person to read "directories are a
+corroboration layer" needs the numbers that say what that is worth.
+
+**The useful consequence is for Phase 7.** The constraint on a new source is
+whether its records can be *joined* to the ones we already have. §5.4's PakPlay
+embeds Maps' own `place_id` in its venue-page iframe, so it joins through
+§10.1's tier 2 — an identity assertion, no name ratio, no distance test. That is
+the property to select for.
 
 Stages 1, 2, 5 and 6 have real bodies and run end to end. Stages 3 and 4 raise
 `StageNotImplementedError` naming the phase that will build them — see
@@ -61,6 +96,10 @@ PROXY_REQUIRED_SOURCES="" uv run python scripts/run_discovery.py \
 
 # Stage 2 — website enrichment over that run
 uv run python scripts/run_enrichment.py --latest
+
+# Stage 2's other input — §5.3 directory corroboration. Measured at zero yield;
+# see the Phase 6 note above before expecting anything from it
+uv run python scripts/run_directories.py --latest
 
 # Stages 5 and 6 — score, rank, dedupe. Pure DB work: no network, no browser
 uv run python scripts/run_scoring.py --latest
@@ -140,10 +179,12 @@ backend/
     sources/
       google_maps.py         §5.1 grid fan-out, payload interception (Playwright)
       website.py             §5.2 cache-first crawler, 4 pages/domain (httpx)
+      businesslist.py        §5.3 the one directory that survived recon (httpx)
     services/
       discovery.py           Stage 1 orchestration
       ingest.py              §10.1 cross-query dedupe and gap-filling merge
       enrichment.py          Stage 2 orchestration and the contact merge rules
+      directories.py         Stage 2's second input — the §5.3 corroboration join
       scoring.py             Stage 5 — normalise, score, rank
       dedupe.py              Stage 6 — the §10.1 cascade and merge
       results.py             the read side — §13 filters, §15 suppression, §10.1 union
@@ -163,8 +204,10 @@ backend/
       jobs.py                what a worker runs; status, timing, source pills
   scripts/
     run_discovery.py         drive Stage 1 directly
-    run_enrichment.py        drive Stage 2 over an existing run
+    run_enrichment.py        drive Stage 2's website pass over an existing run
+    run_directories.py       drive Stage 2's §5.3 directory pass over a run
     run_scoring.py           drive Stages 5–6 over an existing run
+    spike_directories.py     §5.3 recon; --categories audits the slug mapping
     worker.py                the queue consumer
   tests/
 frontend/                    §13's three screens + Settings (Next.js, TanStack)
@@ -232,6 +275,15 @@ number from a Maps listing is a §9.3 *likely* at 0.60 and nothing else in the
 record lifts a business over 60. Stage 2 is not an uplift on this scale — it is
 the difference between a table and an empty filter.
 
+**A distance test is only as good as the worse of its two coordinate sources.**
+§10.1's 150 m radius was calibrated Maps-against-Maps, where both sides come from
+one survey. BusinessList publishes *geocoded approximations* — "Dilara's Salon"
+and "Dilara Salon" are the same business 391 m apart — so across sources the test
+measures the two sources' disagreement about where a business is, not the
+distance between two businesses. This is why §5.3's whole layer joins nothing,
+and why a source that ships Maps' own `place_id` is worth more than a source that
+ships better data.
+
 **The table and the CSV are one query, not two that agree.** §12.2 says the export
 must respect the active filters and sort order, which makes any divergence a
 defect *by definition* — so there is one `ResultQuery`, one `fetch_results`, and
@@ -263,7 +315,7 @@ the measurement.
 
 ## Departures from implementation.md
 
-Five, all deliberate, all covered by a test that explains itself:
+Seven, all deliberate, all covered by a test that explains itself:
 
 1. **`businesses.place_id` is unique per run, not globally.** §11's `TEXT UNIQUE`
    would make a business scrapeable exactly once ever, so the second run of
@@ -283,6 +335,15 @@ Five, all deliberate, all covered by a test that explains itself:
    sharing a number or a domain is a chain or a coincidence and none is a
    duplicate; `test_dedupe.py` pins the real cases and the 54.5 name-similarity
    ceiling that sets the corroborated threshold.
+6. **`directories` defaults off, where §3 lists it as "core, default on".** It
+   was measured at 0 added contacts across 4 slices and 333 listings (§5.3). A
+   source that is on by default and always contributes zero is §5.5's failure
+   mode wearing a toggle.
+7. **Three of §5.3's four directories are refused, including UrduPoint, which
+   §16's Phase 6 row names by name.** Recorded in `taxonomy.EXCLUDED_SOURCES`
+   with the recon that condemned each — UrduPoint carries 4% mobiles and 0%
+   owner names at 171 KB per business, against §5.3's "clean field table, mostly
+   `03xx`, has an owner-name field".
 
 `do_not_contact` (§15) and `source_state` (§7) are also present; §15 requires the
 former in v1 but §11's SQL omits it. Both got their first reader and first writer
@@ -308,9 +369,16 @@ phone correct and reachable, is `phone_1` genuinely the best number under the
 chosen preference, do `confirmed` labels hold up when dialled, what is the true
 duplicate rate. Two findings make it urgent — the ≥ 60 qualification bar has
 **never been calibrated**, and §14's projected 63% qualification rate measured at
-26–37%. Tune the weights against that ground truth *before* building more source
-modules.
+15–37% across four slices. Tune the weights against that ground truth *before*
+building more source modules.
 
-Still open, and unchanged by Phase 5: no PK residential proxy, so all counts are
-from a direct connection and real market variation cannot be separated from Maps
-geo-ranking against a non-PK IP (§5.1, §7.1).
+Phase 6 is weak evidence for doing that first: it was built ahead of the
+validation and returned nothing. It also sharpened what to build next — the
+binding constraint on a new source is **whether its records can be joined to the
+ones we have**, and §5.4's PakPlay is the only remaining source that ships Maps'
+own `place_id` as a join key.
+
+Still open, and unchanged by Phase 6: no PK residential proxy, so all counts are
+from a direct connection. §7.1's "returns the wrong businesses entirely" was
+corrected by measurement — 429/429 Lahore addresses, 0 blocked queries — but
+whether a PK IP surfaces a *different or larger* set has still never been A/B'd.

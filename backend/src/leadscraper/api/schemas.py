@@ -22,7 +22,14 @@ class SourceFlags(BaseModel):
 
     google_maps: bool = True
     business_website: bool = True
-    directories: bool = True
+    # §3 lists directories as "core, default on". Flipped off on the Phase 6
+    # measurement, and recorded as a departure in the README: across four slices
+    # and 333 harvested listings the §5.3 layer added **0 contacts and
+    # corroborated 0 businesses**. A source that is on by default and always
+    # contributes zero is §5.5's failure mode wearing a toggle, so the operator
+    # now opts in. The module is built, tested and correct — see §5.3's Phase 6
+    # note for why it still yields nothing.
+    directories: bool = False
     facebook: bool = False
     instagram: bool = False
 

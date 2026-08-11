@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # must stay comfortably above that. See the §10.1 note and test_dedupe.py.
     dedupe_corroborated_threshold: int = Field(default=75, ge=50, le=100)
 
+    # §5.3 — what to do with a directory row that matched no business in the run.
+    # Off, because §5.3 says these directories are "not a volume driver" and an
+    # unmatched row is at least as likely to be a business the join missed as one
+    # Maps never saw — inserting it then manufactures the duplicate §10.1 exists
+    # to prevent, and a row without coordinates cannot be merged away by Stage 6
+    # either. Turn on for a narrow category where Maps is genuinely thin.
+    directory_insert_unmatched: bool = False
+
     # §6.6 — hard caps for the social module.
     social_requests_per_business: int = 1
     social_cache_days: int = 30

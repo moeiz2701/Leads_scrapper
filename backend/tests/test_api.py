@@ -201,17 +201,21 @@ def test_unknown_city_is_refused_with_the_known_list(
 
 
 @requires_db
-def test_directories_are_accepted_but_warned_about(
+def test_directories_warn_about_coverage_not_about_being_unbuilt(
     client: TestClient, no_proxy_gate: None
 ):
-    """Additive rather than missing, so the run is still the run that was asked
-    for — but §5.5 says never let a source quietly contribute nothing."""
+    """Phase 6 landed, so the "will not contribute to this run" warning had to go
+    — leaving it would lie to the operator. What replaces it is §5.3's coverage
+    warning, which is a permanent property of these directories rather than a
+    build-order note: they corroborate a run, they do not grow one."""
     response = client.post(
         "/api/runs",
         json={"city": "Lahore", "category": "salon", "sources": {"directories": True}},
     )
     assert response.status_code == 201
-    assert any("Phase 6" in w for w in response.json()["warnings"])
+    warnings = response.json()["warnings"]
+    assert not any("Phase 6" in w for w in warnings)
+    assert any("measured at zero yield" in w for w in warnings)
 
 
 @requires_db

@@ -100,6 +100,41 @@ EXCLUDED_SOURCES: dict[str, str] = {
         "Deliberately unused: per-request pricing and quotas would cap the grid "
         "fan-out that makes the volume target reachable (§7.1)."
     ),
+    # §5.3's other three directories, refused on measurement during Phase 6.
+    # Recorded here for the same reason as §4.1's list: so nobody re-adds one
+    # without first reading what the recon found. Reproduce with
+    # `scripts/spike_directories.py`.
+    "urdupoint": (
+        "Named by §5.3 and §16's Phase 6 row, refused on measurement. §5.3 "
+        "describes a 'clean field table (Mob #), mostly 03xx' with an "
+        "owner-name field. Sampled over the 21 Lahore restaurant records its "
+        "directory actually holds: 4% carry a mobile, 85% a landline, and 0% an "
+        "owner name. §9.3 scores a landline 0.00 and §10.2 requires a mobile to "
+        "qualify, so it cannot produce a qualified lead. It also costs one "
+        "request and 171 KB per business against BusinessList's ~2.5 KB, "
+        "because its listing pages carry no phone at all — and its taxonomy is "
+        "industrial ('wool', 'neon sign mfrs'), with no salon or beauty "
+        "category in it at any city."
+    ),
+    "businessbook_pk": (
+        "§5.3 lists it as JS-rendered and warns on its coverage. It does not "
+        "reach the point of needing a browser: /category/{slug}-{id} answers 500, "
+        "and the root alternates between a 73 KB body and an empty one across "
+        "consecutive requests. An unstable source does not earn the Playwright "
+        "dependency §5.3 asks us to weigh."
+    ),
+    "yellowpage_pk": (
+        "§5.3's own verdict is 'low quality, high duplication — use as "
+        "corroboration only', and its category index is a 670 KB page whose "
+        "listings are not in the served HTML. Refused rather than built as a "
+        "second corroboration layer under a corroboration layer."
+    ),
+    "listing_com_pk": (
+        "Serves a Cloudflare interstitial ('Checking your browser before "
+        "accessing') on every path, including the root. That is an access "
+        "control, and §5.5 draws the line there: automate interactions with "
+        "public data, never automate past an access control."
+    ),
 }
 
 

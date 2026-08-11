@@ -63,19 +63,74 @@ def stage_discovery(run_id: uuid.UUID, synonym_limit: int | None = None) -> Stag
 
 
 def stage_contact_enrichment(run_id: uuid.UUID, limit: int | None = None) -> StageResult:
-    """Stage 2 — the business's own website (§5.2).
+    """Stage 2 — the business's own website (§5.2) and §5.3's directories.
 
-    The stage that produces `confirmed` WhatsApp labels: wa.me links, chat
-    widgets, ``tel:`` and JSON-LD, on a 4-page-per-domain budget and no browser.
+    Two inputs, run in that order and reported separately in ``runs.stats``:
 
-    Two of this stage's inputs are still outstanding and will join here rather
-    than replacing what is below — the Maps detail-panel fallback for the ~13%
-    of records whose search payload carried no phone (§5.1), and the directory
-    corroboration layer (§5.3, Phase 6).
+    * **§5.2, the business's own website** — the only source that can produce a
+      `confirmed` WhatsApp label, via wa.me links, chat widgets, ``tel:`` and
+      JSON-LD on a 4-page-per-domain budget and no browser.
+    * **§5.3, BusinessList.pk** — a corroboration layer that joins directory rows
+      to the businesses Maps already found. It runs *after* the website pass so
+      that §5.2's evidence is already recorded when the directory's weaker,
+      bare-number evidence arrives and the upgrade-only rule has something to
+      refuse to overwrite.
+
+    Each input is governed by its own ``sources_enabled`` flag, so a run may
+    have either, both or neither. One input being disabled must never look like
+    the other having failed, which is why the two write separate reports.
+
+    Still outstanding here: the Maps detail-panel fallback for the ~13% of
+    records whose search payload carried no phone (§5.1).
     """
+    from leadscraper.db.models import Run
+    from leadscraper.db.session import session_scope
+    from leadscraper.services.directories import run_directory_corroboration
     from leadscraper.services.enrichment import run_website_enrichment
 
-    return run_website_enrichment(run_id, limit=limit)
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            raise ValueError(f"No such run: {run_id}")
+        sources = dict(run.sources_enabled or {})
+
+    website_on = sources.get("business_website", True)
+    directories_on = bool(sources.get("directories"))
+
+    results: list[StageResult] = []
+    if website_on:
+        results.append(run_website_enrichment(run_id, limit=limit))
+    if directories_on:
+        results.append(run_directory_corroboration(run_id))
+
+    if not results:
+        # Neither input enabled. The caller asked for a stage with nothing in it,
+        # and §5.5 says an empty success is the outcome to avoid above all — so
+        # this raises rather than reporting a clean zero.
+        raise ValueError(
+            f"Stage {Stage.CONTACT_ENRICHMENT.value!r} was scheduled for run "
+            f"{run_id} with neither 'business_website' nor 'directories' enabled. "
+            f"There is no work for it to do."
+        )
+
+    return _combine(Stage.CONTACT_ENRICHMENT, run_id, results)
+
+
+def _combine(stage: Stage, run_id: uuid.UUID, results: list[StageResult]) -> StageResult:
+    """Fold a multi-input stage's results into the one §2 counter set.
+
+    The per-input detail is *not* flattened away — each input already wrote its
+    own report into ``runs.stats`` under its own key, and §13 Screen 2 reads
+    those. This only sums what the queue and the CLI summary need.
+    """
+    combined = StageResult(stage=stage, run_id=run_id)
+    for result in results:
+        combined.processed += result.processed
+        combined.produced += result.produced
+        combined.skipped += result.skipped
+        combined.failed += result.failed
+        combined.notes.update(result.notes)
+    return combined
 
 
 def stage_social_enrichment(run_id: uuid.UUID) -> StageResult:

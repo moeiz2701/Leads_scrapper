@@ -31,7 +31,7 @@ import {
 const CORE_SOURCES = [
   { key: "google_maps", label: "Google Maps", note: "core · ~70% of all leads (§5.1)" },
   { key: "business_website", label: "Business websites", note: "core · the WhatsApp confirmation engine (§5.2)" },
-  { key: "directories", label: "Directories", note: "Phase 6 — will not contribute yet (§5.3)" },
+  { key: "directories", label: "Directories", note: "built · measured at 0 added contacts over 4 slices (§5.3)" },
 ] as const;
 
 const SOCIAL_SOURCES = [

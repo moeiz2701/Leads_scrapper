@@ -92,11 +92,20 @@ def create_run(payload: RunCreate, session: SessionDep) -> RunCreated:
             ) from exc
 
     if sources.get("directories"):
-        # §16 Phase 6. Accepted rather than refused: directories are additive to a
-        # Maps run, so the run is still the run the operator asked for, minus a
-        # source that does not exist yet. Said out loud all the same.
+        # Phase 6 landed, so the old "will not contribute to this run" warning is
+        # gone — leaving it would lie to the operator. What replaces it is not a
+        # build-order note but a measurement, which is worse news and therefore
+        # more important to say: the module runs, the join works, and across four
+        # live slices it produced nothing. Stated as numbers rather than
+        # adjectives so an operator can decide for themselves.
         warnings.append(
-            "Directory modules (§5.3) are Phase 6 and will not contribute to this run."
+            "Directories (§5.3) are built but measured at zero yield: across "
+            "four live slices (726 businesses, 333 BusinessList listings) the "
+            "layer matched 7 rows and added 0 contacts. BusinessList's "
+            "coordinates are geocoded approximations, so §10.1's 150 m join "
+            "rarely fires, and the tiers that do fire need a shared phone — so "
+            "a match is by construction a number we already had. Enabling it "
+            "costs ~6-9 requests and is expected to change nothing."
         )
 
     run = Run(

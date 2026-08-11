@@ -74,7 +74,12 @@ def planned_stages(sources_enabled: dict, *, enrich: bool = True) -> list[Stage]
     that can only raise. Stages 3 and 4 are Phases 8 and 9 and drop out here.
     """
     stages = [Stage.DISCOVERY] if sources_enabled.get("google_maps", True) else []
-    if enrich and sources_enabled.get("business_website", True):
+    # Stage 2 has two inputs — §5.2 business websites and §5.3 directories — and
+    # either one on its own is a reason to run it. §2 lists directories under
+    # contact enrichment for exactly this reason.
+    if enrich and (
+        sources_enabled.get("business_website", True) or sources_enabled.get("directories")
+    ):
         stages.append(Stage.CONTACT_ENRICHMENT)
     if sources_enabled.get("facebook") or sources_enabled.get("instagram"):
         stages.append(Stage.SOCIAL_ENRICHMENT)
