@@ -61,6 +61,22 @@ DOC_SECONDS_PER_DOMAIN = 5.0
 # to predict its yield.
 WEBSITE_FILL_RATE = 0.32
 
+# §6 Stage 3. Both figures are measured **on this installation**, not taken from
+# the doc — §6 has no throughput numbers at all, and §6.7 found that the tier
+# needs a rendered browser rather than the plain page load §6.4 assumes.
+#
+# Median render-to-render gap across 127 live renders (mean 17.9, p90 31.5):
+# §6.6's mandated 8–20 s delay plus a browser launch and a page load. This term
+# dominates any run with the social toggles on — Lahore × food is ~45 minutes of
+# social against ~12 of discovery — so omitting it does not make Screen 1
+# slightly optimistic, it makes it wrong.
+SOCIAL_SECONDS_PER_BUSINESS = 19.0
+
+# 248 of the 898 businesses across the seven runs carry a Facebook or Instagram
+# URL. Per slice it runs 19–33%, which is real spread and is why the caveat below
+# says so out loud rather than presenting 28% as a property of the market.
+SOCIAL_FILL_RATE = 0.28
+
 
 @dataclass(frozen=True, slots=True)
 class Range:
@@ -127,6 +143,7 @@ def estimate_run(
     synonym_limit: int | None = None,
     tile_limit: int | None = None,
     enrich: bool = True,
+    social: bool = False,
 ) -> RunEstimate:
     """Everything §13 Screen 1 can honestly say before the operator clicks Start."""
     plan = build_query_plan(city, category, synonym_limit, tile_limit)
@@ -135,7 +152,7 @@ def estimate_run(
     priors = _prior_runs(session, city, category)
     estimate.prior_runs = priors
 
-    _estimate_runtime(session, estimate, priors, enrich=enrich)
+    _estimate_runtime(session, estimate, priors, enrich=enrich, social=social)
     _report_available(estimate, priors)
     return estimate
 
@@ -151,6 +168,7 @@ def _estimate_runtime(
     priors: list[PriorRun],
     *,
     enrich: bool,
+    social: bool = False,
 ) -> None:
     per_query, basis = _seconds_per_query(session)
     estimate.runtime_basis = basis
@@ -158,25 +176,48 @@ def _estimate_runtime(
     discovery_low = estimate.queries * per_query.low
     discovery_high = estimate.queries * per_query.high
 
+    # Sized from a prior run of the exact slice, for both post-discovery stages:
+    # otherwise the business count is exactly the unknown this module refuses to
+    # invent, and every term downstream of it inherits that.
+    businesses = max((p.businesses for p in priors), default=0)
+    unsized: list[str] = []
+
     enrich_low = enrich_high = 0.0
     if enrich:
-        # Sized from the query plan only where the slice has been run before —
-        # otherwise the business count is exactly the unknown this module refuses
-        # to invent, and the enrichment term inherits that.
-        businesses = max((p.businesses for p in priors), default=0)
         if businesses:
             domains = businesses * WEBSITE_FILL_RATE
             enrich_low = domains * DOC_SECONDS_PER_DOMAIN * 0.6
             enrich_high = domains * DOC_SECONDS_PER_DOMAIN * 1.4
         else:
+            unsized.append("website pass")
+
+    social_low = social_high = 0.0
+    if social:
+        if businesses:
+            # §6.6 pins concurrency at 1, so this is wall clock and it does not
+            # overlap anything: profiles = businesses × the share carrying a
+            # social URL, each costing one browser render.
+            profiles = businesses * SOCIAL_FILL_RATE
+            social_low = profiles * SOCIAL_SECONDS_PER_BUSINESS * 0.6
+            social_high = profiles * SOCIAL_SECONDS_PER_BUSINESS * 1.4
             estimate.caveats.append(
-                "Runtime covers discovery only — sizing the website pass needs a "
-                "business count, and this slice has never been run."
+                "The §6 social pass is the dominant term when it is on: §6.6 caps "
+                "it at concurrency 1 with an 8-20 s delay and §6.7 measured that "
+                "each profile needs a rendered browser. Sized at 28% of businesses "
+                "carrying a social URL, which ranged 19-33% across the seven runs."
             )
+        else:
+            unsized.append("social pass")
+
+    if unsized:
+        estimate.caveats.append(
+            f"Runtime covers discovery only — sizing the {' and the '.join(unsized)} "
+            f"needs a business count, and this slice has never been run."
+        )
 
     estimate.runtime_minutes = Range(
-        low=(discovery_low + enrich_low) / 60.0,
-        high=(discovery_high + enrich_high) / 60.0,
+        low=(discovery_low + enrich_low + social_low) / 60.0,
+        high=(discovery_high + enrich_high + social_high) / 60.0,
     )
 
     if basis == "doc_projection":

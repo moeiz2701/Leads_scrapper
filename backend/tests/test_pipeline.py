@@ -46,10 +46,14 @@ def test_stage_registry_is_declared_not_probed() -> None:
     join that body later rather than replacing it, so the flag flips here once.
     Phase 4 adds Stages 5 and 6 — §10.2 scoring with §3.3 ranking, and the §10.1
     dedupe cascade. Stage 6's export half is Phase 5 and joins the same body.
+    Phase 8 adds Stage 3, §6's social module — rendered rather than fetched, for
+    the reasons §6.7 measured. Stage 4 (§8 attribution) is Phase 9 and is the
+    last one still declaring itself missing.
     """
     assert implemented_stages() == [
         Stage.DISCOVERY,
         Stage.CONTACT_ENRICHMENT,
+        Stage.SOCIAL_ENRICHMENT,
         Stage.NORMALISE_SCORE,
         Stage.DEDUPE_EXPORT,
     ]

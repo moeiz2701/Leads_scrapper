@@ -346,8 +346,18 @@ def _source_for(stage: Stage) -> str | None:
 
 
 def _health(report: dict) -> tuple[SourceStatus, int, str | None]:
-    blocked = int(report.get("queries_blocked") or report.get("sites_blocked") or 0)
-    failed = int(report.get("queries_failed") or report.get("sites_failed") or 0)
+    blocked = int(
+        report.get("queries_blocked")
+        or report.get("sites_blocked")
+        or report.get("profiles_blocked")
+        or 0
+    )
+    failed = int(
+        report.get("queries_failed")
+        or report.get("sites_failed")
+        or report.get("profiles_failed")
+        or 0
+    )
     refused = int(report.get("sites_refused") or 0)
 
     if blocked:

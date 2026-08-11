@@ -132,6 +132,7 @@ def estimate(payload: EstimateRequest, session: SessionDep) -> dict:
         synonym_limit=payload.synonym_limit,
         tile_limit=payload.tile_limit,
         enrich=payload.enrich,
+        social=payload.social,
     ).as_dict()
 
 

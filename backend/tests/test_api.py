@@ -146,7 +146,6 @@ def test_stage_endpoint_names_the_phase_for_each_missing_stage(client: TestClien
     body = client.get("/api/meta/stages").json()
     assert "discovery" in body["implemented"]
     missing = {m["stage"]: m["phase"] for m in body["missing"]}
-    assert missing["social_enrichment"] == "Phase 8"
     assert missing["person_attribution"] == "Phase 9"
 
 
@@ -156,22 +155,39 @@ def test_stage_endpoint_names_the_phase_for_each_missing_stage(client: TestClien
 
 
 @requires_db
-def test_run_with_facebook_is_refused_and_names_phase_8(
+def test_run_with_facebook_is_accepted_now_that_phase_8_landed(
     client: TestClient, no_proxy_gate: None
 ):
-    """§5.5: a run that cannot do the work must not be started and reported done.
+    """The successor to ``test_run_with_facebook_is_refused_and_names_phase_8``.
 
-    Stage 3 has no body, so enabling Facebook would produce a run that silently
-    omits a source the operator explicitly chose.
+    That test pinned the §5.5 rule — never start a run that silently omits a
+    source the operator chose — by asserting Stage 3 was refused. Phase 8 built
+    Stage 3, so the same rule now demands the opposite assertion: the run is
+    accepted, and ``stages_planned`` says out loud that the social stage will
+    actually execute. Rewritten rather than deleted, because a deleted test
+    would leave the rule unpinned in whichever direction it currently points.
     """
     response = client.post(
         "/api/runs",
         json={"city": "Lahore", "category": "salon", "sources": {"facebook": True}},
     )
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["stages"] == ["social_enrichment"]
-    assert "Phase 8" in detail["message"]
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert "social_enrichment" in body["stages_planned"]
+    assert body["stages_unavailable"] == []
+
+
+@requires_db
+def test_run_with_person_attribution_still_names_its_phase(client: TestClient):
+    """The refusal mechanism itself, still pinned on the stage that lacks a body.
+
+    Phase 8 graduated Stage 3 out of ``IMPLEMENTED_STAGES``'s complement; Stage 4
+    is what keeps ``/api/meta/stages`` honest until Phase 9.
+    """
+    body = client.get("/api/meta/stages").json()
+    assert "social_enrichment" in body["implemented"]
+    missing = {m["stage"]: m["phase"] for m in body["missing"]}
+    assert missing == {"person_attribution": "Phase 9"}
 
 
 @requires_db

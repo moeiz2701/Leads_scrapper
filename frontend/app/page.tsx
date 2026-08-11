@@ -34,9 +34,21 @@ const CORE_SOURCES = [
   { key: "directories", label: "Directories", note: "built · measured at 0 added contacts over 4 slices (§5.3)" },
 ] as const;
 
+// Live since Phase 8. The notes say what was *measured* (§6.7) rather than what
+// §6 promised, for the same reason the directories toggle does: an operator
+// choosing a source deserves its real yield, not its brochure. Facebook is
+// listed first because it is the one that produces confirmed numbers.
 const SOCIAL_SOURCES = [
-  { key: "facebook", label: "Facebook Pages", note: "Phase 8 (§6)" },
-  { key: "instagram", label: "Instagram", note: "Phase 8 (§6)" },
+  {
+    key: "facebook",
+    label: "Facebook Pages",
+    note: "58% carry a WhatsApp button (§6.7) — slow: renders a browser per business",
+  },
+  {
+    key: "instagram",
+    label: "Instagram",
+    note: "50% print a number in the bio, only 10% confirm WhatsApp (§6.7)",
+  },
 ] as const;
 
 export default function NewRunScreen() {
@@ -91,11 +103,15 @@ export default function NewRunScreen() {
         category,
         synonym_limit: synonymLimit === "" ? null : synonymLimit,
         tile_limit: tileLimit === "" ? null : tileLimit,
+        social: Boolean(sources.facebook || sources.instagram),
       })
       .then(setEstimate)
       .catch((e) => setError(String(e)))
       .finally(() => setEstimating(false));
-  }, [city, category, synonymLimit, tileLimit]);
+    // Ticking a social toggle changes the estimate materially, so it belongs in
+    // the dependency list — §6.7 measured the social pass at ~45 minutes on
+    // Lahore x food against ~12 for discovery.
+  }, [city, category, synonymLimit, tileLimit, sources.facebook, sources.instagram]);
 
   useEffect(() => {
     refreshEstimate();
@@ -233,12 +249,13 @@ export default function NewRunScreen() {
           ))}
           {SOCIAL_SOURCES.map((s) => (
             <label key={s.key} className="check">
-              {/* Disabled rather than hidden: §6 is a real part of the design and
-                  the operator should see it exists and is not ready, instead of
-                  wondering why the doc mentions a source the UI does not. */}
-              <input type="checkbox" disabled checked={false} readOnly />
-              <span className="muted">
-                {s.label} <span className="small">{s.note}</span>
+              <input
+                type="checkbox"
+                checked={sources[s.key] ?? false}
+                onChange={(e) => setSources({ ...sources, [s.key]: e.target.checked })}
+              />
+              <span>
+                {s.label} <span className="small muted">{s.note}</span>
               </span>
             </label>
           ))}

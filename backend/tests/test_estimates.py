@@ -162,6 +162,42 @@ def test_runtime_is_a_range_and_says_where_it_came_from(db_session: Session):
 
 
 @requires_db
+def test_enabling_social_dominates_the_runtime_estimate(db_session: Session):
+    """§6 Stage 3 is the largest term in any run that has it on.
+
+    §6.7 measured that each profile needs a *rendered* browser at §6.6's 8-20s
+    pacing with concurrency 1 — 19 s per business, against ~12 s for a whole Maps
+    query. On Lahore × food that is ~45 minutes of social against ~12 of
+    discovery. Screen 1 quoting the discovery figure while the operator has
+    Facebook ticked is precisely the dishonesty this module exists to avoid.
+    """
+    _run(db_session, "Lahore", businesses=428, queries=6, enriched=True)
+
+    without = estimate_run(db_session, "Lahore", "salon", social=False)
+    with_social = estimate_run(db_session, "Lahore", "salon", social=True)
+
+    assert with_social.runtime_minutes.low > without.runtime_minutes.low
+    # Not a rounding difference: 428 businesses × 28% × 19 s is ~38 minutes.
+    added = with_social.runtime_minutes.high - without.runtime_minutes.high
+    assert added > 20
+    assert any("§6 social pass" in c for c in with_social.caveats)
+
+
+@requires_db
+def test_social_runtime_is_not_invented_for_a_slice_never_run(db_session: Session):
+    """The same refusal the website term already makes, for the same reason.
+
+    Sizing the social pass needs a business count, and the business count is
+    exactly the unknown this module will not fabricate. The honest output is a
+    discovery-only runtime plus a caveat naming what is missing from it.
+    """
+    estimate = estimate_run(db_session, "Faisalabad", "entertainment", social=True)
+
+    assert estimate.runtime_minutes.low > 0
+    assert any("social pass" in c and "never been run" in c for c in estimate.caveats)
+
+
+@requires_db
 def test_estimate_serialises_without_losing_its_caveats(db_session: Session):
     """The caveats are the honest part; an API shape that drops them would put
     the bare number back on screen."""

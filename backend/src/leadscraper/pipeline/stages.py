@@ -133,10 +133,22 @@ def _combine(stage: Stage, run_id: uuid.UUID, results: list[StageResult]) -> Sta
     return combined
 
 
-def stage_social_enrichment(run_id: uuid.UUID) -> StageResult:
-    """Stage 3 — FB Page public data, IG bio → bio-link follow (§6). Toggled off
-    by default; §6.6 caps this at one request per business per run."""
-    raise StageNotImplementedError(Stage.SOCIAL_ENRICHMENT, "Phase 8")
+def stage_social_enrichment(run_id: uuid.UUID, limit: int | None = None) -> StageResult:
+    """Stage 3 — FB Page and IG profile, rendered logged out (§6.4, §6.7).
+
+    Toggled off by default; §6.6 caps this at one request per business per run,
+    and ``SocialSource`` enforces that rather than trusting the caller.
+
+    Facebook is read before Instagram, which is **not** §6's stated ordering.
+    §6.7 measured 58% of rendered FB Pages carrying an
+    ``api.whatsapp.com/send?phone=`` button against 10% of IG profiles, and this
+    stage exists to produce `confirmed` — so it follows the measurement. With the
+    default cap of one request per business, a business holding both URLs is read
+    on Facebook only.
+    """
+    from leadscraper.services.social import run_social_enrichment
+
+    return run_social_enrichment(run_id, limit=limit)
 
 
 def stage_person_attribution(run_id: uuid.UUID) -> StageResult:
@@ -190,6 +202,7 @@ IMPLEMENTED_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.DISCOVERY,
         Stage.CONTACT_ENRICHMENT,
+        Stage.SOCIAL_ENRICHMENT,
         Stage.NORMALISE_SCORE,
         Stage.DEDUPE_EXPORT,
     }

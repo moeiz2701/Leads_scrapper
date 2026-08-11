@@ -53,6 +53,8 @@ def _run(session: Session, **overrides) -> Run:
 
 
 def test_planned_stages_are_the_implemented_ones_in_section_2_order():
+    # ALL_CORE has the social toggles off — §6.6 keeps them opt-in — so Stage 3
+    # is absent here because it was not asked for, not because it is missing.
     assert planned_stages(ALL_CORE) == [
         Stage.DISCOVERY,
         Stage.CONTACT_ENRICHMENT,
@@ -61,11 +63,31 @@ def test_planned_stages_are_the_implemented_ones_in_section_2_order():
     ]
 
 
-def test_social_stage_is_never_planned_while_its_body_is_missing():
-    """Phase 8. Enqueuing it would create work that can only raise."""
+def test_social_stage_is_planned_once_phase_8_landed():
+    """Phase 8 gave Stage 3 a body, so asking for Facebook now plans it.
+
+    This test previously asserted the opposite — that the stage was refused and
+    named "Phase 8". Rewritten rather than deleted, because the thing worth
+    pinning is unchanged: ``planned_stages`` and ``unavailable_stages`` must
+    agree with ``IMPLEMENTED_STAGES``, whichever way that set currently reads.
+    """
     plan = planned_stages({**ALL_CORE, "facebook": True})
-    assert Stage.SOCIAL_ENRICHMENT not in plan
-    assert unavailable_stages({"facebook": True}) == [Stage.SOCIAL_ENRICHMENT]
+    assert Stage.SOCIAL_ENRICHMENT in plan
+    assert unavailable_stages({"facebook": True}) == []
+    assert unavailable_stages({"instagram": True}) == []
+
+
+def test_social_stage_sits_between_enrichment_and_scoring():
+    """§2's order. Stage 3's evidence must land before Stage 5 scores it —
+    a confirmed WhatsApp found after scoring would not reach the lead score."""
+    plan = planned_stages({**ALL_CORE, "facebook": True})
+    assert plan.index(Stage.CONTACT_ENRICHMENT) < plan.index(Stage.SOCIAL_ENRICHMENT)
+    assert plan.index(Stage.SOCIAL_ENRICHMENT) < plan.index(Stage.NORMALISE_SCORE)
+
+
+def test_attribution_stage_is_still_refused_and_names_phase_9():
+    """The mechanism Phase 8 just graduated from, still pinned on Stage 4."""
+    assert Stage.PERSON_ATTRIBUTION not in planned_stages(ALL_CORE)
 
 
 def test_every_planned_stage_has_an_implementation():

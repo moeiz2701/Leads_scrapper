@@ -185,6 +185,10 @@ export const api = {
     category: string;
     synonym_limit?: number | null;
     tile_limit?: number | null;
+    // §6 Stage 3. Sent because it dominates the runtime when on — the social
+    // pass renders a browser per business at §6.6's 8-20s pacing — and an
+    // estimate that silently omits it is the one thing this screen must not do.
+    social?: boolean;
   }) =>
     request<RunEstimate>("/api/meta/estimate", {
       method: "POST",

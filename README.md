@@ -22,7 +22,127 @@ Phases 7–10 are outstanding.
 | ✅ Phase 4 | §10.2 lead scoring, §3.3 ranking by `number_preference`, §10.1 dedupe cascade |
 | ✅ Phase 5 | §12 CSV export, FastAPI, the §2 queue given producers + a worker, §13's three screens + Settings, §15 suppression + bulk delete, §10.1's cross-run union |
 | ✅ Phase 6 | §5.3 horizontal directories — BusinessList.pk built, three sources refused on recon. **Measured at zero yield; defaulted off** ([§5.3](implementation.md)) |
+| ✅ Phase 8 | §6 Tier 3 — FB Pages and IG profiles, **rendered** logged out. Facebook first, against §6's own ordering. Tier 2 measured and deferred ([§6.7](implementation.md)) |
 | ⬜ Next | **§16 validation pass — needs a human.** Hand-check 50 rows, then tune the weights |
+
+### Phase 8: §6 was never measured, and three of its four claims were wrong
+
+§6 was the only section of the design doc carrying **no correction notes at
+all** — every figure in it was written before anything was fetched. Phase 6 had
+just shown what that is worth, so Phase 8 reconned first
+([`spike_social.py`](backend/scripts/spike_social.py)) and wrote the numbers into
+§6.7 before writing the module.
+
+**§6.4's mechanism is wrong; its substance is right.** The phone really is one
+hop away on a page with no wall — but the page has to be *rendered*:
+
+| | Plain fetch (what §6.4 specifies) | Rendered, logged out |
+|---|---|---|
+| IG bio text | **0 / 20** | **20 / 20** |
+| IG bio link | **0 / 20** | 14 / 20 |
+| FB Page reachable | **0 / 20 — HTTP 400** | **12 / 12 — HTTP 200** |
+
+A logged-out `httpx` GET of an Instagram profile returns 200 and ~605 KB of JS
+shell whose `<title>` is the word `Instagram`. A Facebook Page returns HTTP 400
+and a 1.5 KB error page — not a login wall — for every URL variant. Both render
+fine in an ordinary logged-out browser. That is a **cost** change, not a policy
+one: no login, no credential store, no cookie injection, no fingerprint work,
+which is exactly where §6.1 draws the line. Budget ~20s per business.
+
+**Two corrections that decide whether the tier works at all.** §6.4 says to read
+the bio from `og:description`; on Instagram that tag holds *"12K Followers, 10
+Following, 228 Posts"* and the bio is in `<meta name="description">`. Reading the
+tag §6.4 names measures this tier at 0 numbers in 20 profiles when the real
+figure is 10. And Meta hides these URLs inside JSON string literals — `\/` for
+slashes, and Facebook **double-encodes** its outbound link shim as
+`u=https%3A%2F%2F…`. The first live run silently truncated every
+bio link to the five characters `https`, which looks identical to "this Page has
+no bio link". Both are pinned by tests.
+
+**Facebook is the confirmation engine, not Instagram** — the reverse of §6's and
+§16's ordering:
+
+| Rendered | Instagram (n=20) | Facebook (n=12) |
+|---|---|---|
+| Inline `03xx` in bio | **10/20 (50%)** | 1/12 (8%) |
+| **WhatsApp button** | **2/20 (10%)** | **7/12 (58%)** |
+
+§9.3 scores a platform WhatsApp button at 0.90 — `confirmed`. Instagram's bio
+numbers are 0.60 *likely*, the same score 850 of 898 businesses already carry, so
+they matter for the 47 businesses with no phone at all and are close to a
+constant elsewhere. So Stage 3 reads Facebook first, and §6.6's one-request-
+per-business cap means a business holding both URLs is read on Facebook only.
+
+**What it did on three live slices** — the first source module since §5.2 to add
+anything at all:
+
+| | Lahore × salon | Lahore × food | Islamabad × salon |
+|---|---|---|---|
+| Businesses / with a social URL | 60 / 26 | 428 / 140 | 199 / 55 |
+| **Businesses with a `confirmed` number** | 4 → **9** | 13 → **20** | 28 → **30** |
+| **Qualified** (≥ 60 + a mobile) | 22 → **26** | 65 → **76** | 45 → **47** |
+| Websites gap-filled for §5.2 | +3 | +28 | +5 |
+
+**+17 qualified leads from 36 new contacts.** Islamabad is the informative slice:
+it is the one §5.2 already did *best* on, and Tier 3 still added to it. The tiers
+are not substitutes — a business publishes a WhatsApp button on its Page or it
+does not, independently of whether it also runs a website. The gap-filled websites
+matter because **97 businesses across the seven runs hold a social URL and no
+website at all**, and for them this stage is the only route to a confirmed number
+that will ever exist.
+
+Read the +17 with the caveat below about the uncalibrated ≥ 60 bar: a `confirmed`
+label is worth +12 points, which is the width of the 50–59 band the score
+distribution piles into, so the bar is doing as much work here as the data is.
+
+Re-running the stage changes **0 contacts** — verified, not assumed. The merge is
+upgrade-only on evidence and gap-fill-only on everything else.
+
+**The tier's real ceiling is the shell rate, not the button rate.** 31% of
+profiles on Lahore × food and 62% on Islamabad × salon come back HTTP 200 with no
+profile in them — real Pages, not junk URLs. It is transient (a retry rendered
+one) and it got worse across a long session, which is the signature of soft
+rate-limiting. Budget on rendering about two thirds of what you ask for per pass.
+Shells are deliberately **not cached**: a 30-day TTL on a non-result would turn one
+transient gate into a month of permanent misses. The cost is that a re-run retries
+them (~40 requests on Lahore × food) rather than being free.
+
+**§6.4's headline branch does not exist here.** §6.4 builds its pipeline around a
+bio link that is "virtually always" a Linktree-style hub with a WhatsApp button.
+Across 32 rendered profiles, **zero** were. The real distribution is stores (15),
+other social profiles (8), `wa.me` (2), nothing (7) — so no hub-follower was
+built. A store bio-link gap-fills `website` and §5.2 picks it up on the next
+Stage 2 pass.
+
+**Tier 2 (§6.3) was measured and deferred, which is not the same as unbuilt.** A
+targeted `site:instagram.com "<name>" <city>` returns the right profile 6 times
+in 20, and a name-similarity filter is unusable — 11 of 20 top hits score ≥88
+while only 6 are correct, because `/popular/` location pages and `/p/` permalinks
+carry the business name too. Filtering to bare-handle URLs gives 6 correct of 7
+accepted at 30% recall. Meanwhile 6 of 12 Facebook Pages link their own Instagram
+account, which is the same feeder for free. §6.7 has the numbers.
+
+**Four defects were found by running it, and three failed silently.** Facebook
+double-encodes its link shim, so every bio link truncated to the string `https` —
+and the run honestly reported "0 websites filled", which is what a Page with no
+bio link also looks like. The §7 breaker treated an ordinary empty Page as a
+broken selector and blocked 29 Pages while **all 77 renders had returned HTTP
+200**. A WhatsApp button number was never line-classified, landing as `confirmed`
+with `line_type=unknown` — and §10.2 qualifies on "≥60 **and a mobile**", so the
+most valuable row the stage produces was the one the export would drop. Each is
+now pinned by a test. This is §5.5's failure mode one layer below where §5.5
+expects it: not a source returning zero, but a *field* returning zero inside a
+source that otherwise looks healthy.
+
+**Screen 1's runtime estimate now includes Stage 3.** At 19 s per business
+(measured over 127 renders) and 28% of businesses carrying a social URL, the
+social pass is ~45 minutes on Lahore × food against ~12 for discovery. Enabling
+the toggles without teaching `services/estimates.py` about them would have made
+Screen 1 understate runtime by a factor of four — the precise dishonesty that
+screen exists to avoid.
+
+**Not built: Tier 4 (§6.5), the operator queue.** `operator_queue_cap` has been
+in settings since Phase 1 and still has no reader.
 
 ### Phase 6 shipped a negative result, and that is the deliverable
 
@@ -100,6 +220,10 @@ uv run python scripts/run_enrichment.py --latest
 # Stage 2's other input — §5.3 directory corroboration. Measured at zero yield;
 # see the Phase 6 note above before expecting anything from it
 uv run python scripts/run_directories.py --latest
+
+# Stage 3 — §6 social. Renders a browser per business at §6.6's 8-20s pacing,
+# so budget ~20s each. Cached for 30 days: a second pass makes no requests
+uv run python scripts/run_social.py --latest
 
 # Stages 5 and 6 — score, rank, dedupe. Pure DB work: no network, no browser
 uv run python scripts/run_scoring.py --latest
@@ -180,11 +304,13 @@ backend/
       google_maps.py         §5.1 grid fan-out, payload interception (Playwright)
       website.py             §5.2 cache-first crawler, 4 pages/domain (httpx)
       businesslist.py        §5.3 the one directory that survived recon (httpx)
+      social.py              §6.4 FB/IG profiles, rendered logged out (Playwright)
     services/
       discovery.py           Stage 1 orchestration
       ingest.py              §10.1 cross-query dedupe and gap-filling merge
       enrichment.py          Stage 2 orchestration and the contact merge rules
       directories.py         Stage 2's second input — the §5.3 corroboration join
+      social.py              Stage 3 — §6 Tier 3, and the bio-link routing
       scoring.py             Stage 5 — normalise, score, rank
       dedupe.py              Stage 6 — the §10.1 cascade and merge
       results.py             the read side — §13 filters, §15 suppression, §10.1 union
@@ -206,8 +332,10 @@ backend/
     run_discovery.py         drive Stage 1 directly
     run_enrichment.py        drive Stage 2's website pass over an existing run
     run_directories.py       drive Stage 2's §5.3 directory pass over a run
+    run_social.py            drive Stage 3's §6 social pass over a run
     run_scoring.py           drive Stages 5–6 over an existing run
     spike_directories.py     §5.3 recon; --categories audits the slug mapping
+    spike_social.py          §6 recon; --profiles/--render/--serper/--bio-links
     worker.py                the queue consumer
   tests/
 frontend/                    §13's three screens + Settings (Next.js, TanStack)
@@ -305,6 +433,15 @@ the two Lahore runs disagree in the wrong direction — 3 queries gave 60 unique
 6 gave 52. So `services/estimates.py` reports *runtime* (ours, from the query plan
 and §7 pacing) and refuses *availability* for any slice that has never been run.
 §5.2 requires this explicitly. Do not add a multiplier here.
+
+**A 200 is not a page.** Instagram answers a logged-out fetch with HTTP 200 and
+605 KB of JavaScript containing nothing; Facebook answers with HTTP 400. Neither
+is a wall and neither is an error you can retry — they are what a non-browser
+client gets, and the answer is to render the page or to record `blocked`, never
+to dress the client up as something it is not (§6.1). The corollary is that a
+rendered body and a fetched body are **different artifacts** and must not share a
+§7 cache key, or the module "hits cache" on a body that provably contains
+nothing. `sources/social.py` keys renders separately for exactly this reason.
 
 **For websites, a refusing host is not a refusing source.** §7's circuit breaker
 is per source, which is right for Maps. The website module is a few hundred

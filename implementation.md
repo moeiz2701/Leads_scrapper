@@ -604,6 +604,219 @@ For high-value leads the pipeline couldn't resolve, queue them in the UI with a 
 - If a wall appears, record `blocked` on the record and move on. A blocked record is a valid outcome, not a failure to route around.
 - Toggle defaults to **off**. Treat FB/IG as a 5–10% uplift on top of a run that already succeeded without it.
 
+### 6.7 Note — §6 measured for the first time, Aug 2026
+
+Until this note, §6 was the only section in this document carrying no correction
+at all: every number above was written before anything was fetched. §5.3 read the
+same way and Phase 6 measured it at zero, so §6 was reconned before a line of the
+module was written. `scripts/spike_social.py` reproduces all of it, and every
+body is in the §7 archive, so re-checking any figure below costs no requests.
+
+Method: 20 Instagram and 20 Facebook URLs taken from the seven live runs, fetched
+logged-out; then 20 IG and 12 FB of the same set **rendered** in a logged-out
+browser; then 20 targeted Serper queries against businesses whose Instagram
+handle we already hold, so the join could be checked against ground truth rather
+than against a similarity score.
+
+**The headline: §6.4's mechanism is wrong and §6.4's substance is right.**
+
+| §6 claim | Plain fetch (§6.4's "no browser") | Rendered, logged out |
+|---|---|---|
+| IG returns `og:description` | **0 / 20** | 20 / 20 |
+| IG bio text available | **0 / 20** | **20 / 20** |
+| IG bio link present | **0 / 20** | 14 / 20 |
+| FB Page reachable at all | **0 / 20 — HTTP 400** | **12 / 12 — HTTP 200** |
+
+A logged-out `httpx` GET of an Instagram profile returns HTTP 200 and ~605 KB of
+JS application shell whose `<title>` is the word `Instagram`. There is no bio, no
+`external_url`, no `bio_links`, no phone. A logged-out GET of a Facebook Page
+returns **HTTP 400** and a 1,542-byte "Sorry, something went wrong" error page —
+not a login wall, not a challenge — for every URL variant tried (`www`, bare,
+`/about`, `m.facebook.com`).
+
+**So §6.4's "ONE logged-out page load … no browser" is false as written, and its
+"the phone number is one hop away, on a page with no wall at all" is true.** The
+page needs rendering, not credentials. Rendering a public page the way a browser
+renders it stays inside §6.1: no login, no credential store, no cookie injection,
+no fingerprint work — vanilla Playwright with a default context. What changes is
+the *cost*, and §14 should read it as such: Tier 3 is a browser tier priced like
+Maps discovery, not a cheap `httpx` tier priced like §5.2.
+
+**Correction to §6.4's parsing instruction.** The bio is **not** in
+`og:description`. On Instagram `og:description` is `"147K Followers, 179
+Following, 5,777 Posts"` and can never contain a phone number; the bio text lives
+in `<meta name="description">`. Reading the tag §6.4 names measures this tier at
+0/20 when it is really 10/20. This cost one full measurement pass to find.
+
+**The two tiers invert. Facebook is the confirmation engine, not Instagram.**
+
+| Rendered, logged out | Instagram (n=20) | Facebook (n=12) |
+|---|---|---|
+| Profile/Page content rendered | 20 / 20 | 12 / 12 |
+| Bio/description text served | 20 / 20 | 12 / 12 |
+| Inline `03xx` mobile in the bio | **10 / 20 (50%)** | 1 / 12 (8%) |
+| Bio link present | 14 / 20 | 11 / 12 |
+| **WhatsApp link/button in the page** | **2 / 20 (10%)** | **7 / 12 (58%)** |
+
+§6 orders Instagram first and calls Tier 3 "highest yield". For the label that
+actually matters it is backwards. **58% of Facebook Pages carry an
+`api.whatsapp.com/send?phone=…` button** — §9.3's 0.90 row, `confirmed` — against
+10% of Instagram profiles. Instagram's strength is different and still real: half
+of its bios print a mobile in plain text, and one bio carried five (Rina's
+Kitchenette lists a number per branch). Those are §9.3 0.60 *likely* unless
+something else lifts them, which is the same score 850 of our 898 businesses
+already carry — so Instagram's inline numbers are worth having for the 47
+businesses with no phone at all, and are close to a constant everywhere else.
+
+Instagram's bio-link destinations (n=20): **store 11, none 6, social 2, wa.me 1.**
+§6.4 presents its three-way branch as though the WhatsApp branch were the common
+one. It is the rarest. The common branch is a store URL, which is a hand-off to
+the §5.2 module that already exists.
+
+**A free feeder nobody costed: Facebook → Instagram.** 6 of 12 Facebook bio links
+are Instagram profiles. That is a platform-to-platform join needing no SERP
+credits, no name matching and no join test — the Page says which account is its
+own.
+
+**§6.3 measured, and it is a feeder, not a number source.**
+
+| §6.3 claim | Measured |
+|---|---|
+| "20–35% of pages surface a number" | **3 / 20 (15%)** of snippets carried a mobile |
+| Targeted `site:instagram.com "<name>" <city>` finds the right profile | **6 / 20 (30%)** |
+| Recoverable further down the results | **0** — when the top hit is wrong, the known handle is nowhere in the top 10 either |
+
+And a trap: **11 / 20 top hits score ≥88 name similarity but only 6 are the right
+profile.** The high-scoring wrong ones are `instagram.com/popular/<slug>` location
+pages and `/p/` and `/reel/` permalinks, which carry the business name and are not
+profiles. A name ratio is therefore *not* a usable join test here. Filtering to
+bare-handle profile URLs gives **6 correct out of 7 accepted, at 30% recall** —
+high precision, low recall, which is the right shape for a join and the wrong
+shape for a volume source. §6.3's own literal example is a *broad* query; anything
+it finds has no `place_id`, no coordinates and no address, which is exactly the
+unjoinable population that made §5.3 yield nothing. Use targeted queries only.
+
+**What the name ratio cannot catch, and what to be honest about.** Entity match
+on the URLs we already hold is good — 30 of 32 rendered pages score ≥61 name
+similarity against the business we asked about. The residual risk is not
+mis-naming, it is **branch versus brand**: "Tao Pan - Lahore" resolves to the
+Gujranwala Page, "The Carnivore Lahore" to the Islamabad one, "Butlers Chocolate
+Café" to Butlers Chocolates of Dublin. All three score 85–100 on name, because
+the name *is* right. A number harvested from a national brand Page is a real,
+contactable number that does not belong to the branch in the row. Name similarity
+cannot see this; only `source_url` and `wa_evidence_url` can, which is why §1's
+provenance rule is what makes this tier auditable rather than merely plausible.
+
+**Two §6.6 rules survive the measurement unchanged and one gains a reason.** The
+30-day cache and the 1-request-per-business cap are right. The 8–20s delay is now
+also a browser-launch budget. And "a `blocked` record is a valid outcome" is the
+rule that stops the FB HTTP 400 from being read as something to route around: it
+is what a non-browser client gets, and the answer is to render or to record
+`blocked`, never to dress the client up as something it is not.
+
+**A §6.1 boundary that was checked and not crossed.** Meta serves `og:` tags to
+link-preview crawlers, so claiming to be `facebookexternalhit` is a way to get
+metadata a browser is refused. `spike_social.py --ua-probe` exists to measure that
+difference and report it; nothing in the module uses it. Presenting a false
+identity to obtain content otherwise withheld is the thing §6.1 rules out, and
+the rendered path makes the question moot — the browser gets the page honestly.
+
+### 6.8 Note — Tier 3 run live on three slices, Aug 2026
+
+Recon said the tier should work. This is what it did, and it is the first source
+module since §5.2 to add anything at all.
+
+| | Lahore × salon | Lahore × food | Islamabad × salon |
+|---|---|---|---|
+| Businesses | 60 | 428 | 199 |
+| With a social URL | 26 | 140 | 55 |
+| **Businesses with a `confirmed` number** | 4 → **9** | 13 → **20** | 28 → **30** |
+| **Qualified (§10.2 ≥ 60 + a mobile)** | 22 → **26** | 65 → **76** | 45 → **47** |
+| Websites gap-filled for §5.2 | +3 | +28 | +5 |
+| Phone contacts added | +5 | +22 | +3 |
+
+**+17 qualified leads across the three slices, from 36 new contacts.** The
+leverage is §10.2's: a `confirmed` label is worth +12 points against a bare
+mobile's 0.60, which is exactly the width of the 50–59 band the score
+distribution piles into. That is also the warning — the ≥60 bar has still never
+been calibrated and it sits on a spike, so "+17 qualified" is a statement about
+the current weights as much as about the data. §16's validation pass is what turns
+it into a statement about leads.
+
+Islamabad is the informative one. It is the slice §5.2 already did *best* on — 28
+of 199 businesses confirmed, against Lahore × food's 13 of 428 — and Tier 3 still
+added 2 more plus 5 websites. The tiers are not substitutes: a business publishes
+a WhatsApp button on its Facebook Page or it does not, and that is independent of
+whether it also runs a website.
+
+**Re-running the stage is idempotent, and that is worth stating because it was
+verified rather than assumed.** A second pass over Lahore × food reported 0
+contacts added and 0 upgraded. The merge is upgrade-only on evidence and gap-fill
+only on everything else, so the stage can be re-run after a parser fix without
+disturbing what earlier passes established.
+
+**The tier's real ceiling is not the 58% button rate — it is the shell rate.**
+
+| | Rendered | HTTP 200, no profile |
+|---|---|---|
+| Lahore × food | 96 | **44 (31%)** |
+| Islamabad × salon | 21 | **34 (62%)** |
+
+These are not junk URLs; they are real Pages and real handles. The page comes back
+with the application shell and no `og:` tags. Two things are known about it: it is
+**transient** — re-requesting one of them rendered it fine — and it got **worse
+across a long session**, 31% early and 62% after roughly 200 cumulative renders.
+That is the signature of soft rate-limiting, and it is the honest cap on this
+tier: budget on rendering roughly two thirds of what you ask for in one pass, and
+re-run to pick up the rest. §6 does not mention this at all.
+
+Two consequences the module encodes:
+
+* **A shell is never cached.** §6.6's 30-day TTL on a non-result would convert one
+  transient gate into a month of permanent misses — the re-run would "hit cache",
+  find nothing, and report the business as having no bio until September. This is
+  the one place §7's "save every raw response" is deliberately not applied, for
+  §7's own stated reason: bodies are kept so a broken selector can be re-parsed,
+  and there is nothing in a shell to re-parse. The cost is that a re-run is not
+  free — it retries them, ~40 requests on Lahore × food.
+* **An empty page must not trip the §7 breaker.** `CircuitBreaker` implements
+  §5.5's "the selectors stopped matching" rule as five consecutive unproductive
+  successes. Counting a shell as unproductive tripped the Facebook breaker 77
+  profiles into Lahore × food and blocked the remaining 29 Pages — while **all 77
+  renders had returned HTTP 200 and Facebook had refused nothing.** §5.5's check
+  belongs at the stage ("rendered 15+ profiles, found zero numbers"), not at the
+  request. `sources/businesslist.py` moved the same check up a level for the same
+  reason, and §5.2 split host from source for the third version of this mistake.
+
+**Throughput, for §14 and for §13 Screen 1.** 19 s per business, median across 127
+live renders (mean 17.9, p90 31.5) — §6.6's 8–20 s delay plus a browser launch and
+page load, at concurrency 1. 28% of businesses carry a social URL (248 of 898;
+19–33% per slice). On Lahore × food that is ~45 minutes of social against ~12 of
+discovery, so **this term dominates any run with the toggles on** and
+`services/estimates.py` now includes it. Screen 1 quoting a discovery-only runtime
+while the operator has Facebook ticked is exactly the dishonesty §13 forbids.
+
+**Two markup traps, both of which fail silently rather than loudly.** Meta hides
+these URLs inside JSON string literals: `\/` for a slash, and Facebook
+*double-encodes* its outbound link shim as `u=https%3A%2F…`. A URL
+matcher stops at the backslash, so every Facebook bio link truncated to the five
+characters `https` — which is indistinguishable in the run stats from "this Page
+has no bio link". The run honestly reported 0 websites filled and nothing looked
+broken. Separately, `/profilecard/` is Instagram's share-card view and carries no
+bio; the same handle without the suffix renders fully. Instagram's tracking
+params (`igshid`, `igsh`, `utm_*`) were tested alongside it and make **no**
+difference, recorded here so nobody strips them on suspicion later.
+
+**What still cannot be checked automatically.** Entity match is good — 30 of 32
+rendered pages score ≥61 name similarity against the business we asked about — but
+the residual risk is branch versus brand, and a name ratio cannot see it. "Tao Pan
+- Lahore" resolves to the Gujranwala Page, "The Carnivore Lahore" to Islamabad,
+"Butlers Chocolate Café" to Butlers of Dublin, all scoring 85–100 because the name
+*is* right. Verified on the live data: a number proven this way keeps
+`source`/`source_url` pointing at Maps and records the Page in `wa_evidence_url`,
+so §1's provenance rule is what makes this auditable. It is the first thing the
+§16 validation pass should hand-check.
+
 ---
 
 ## 7. Anti-blocking (the legitimate kind)
@@ -1165,7 +1378,7 @@ Comfortably inside the "few hundred good-quality leads" target for broad categor
 | **5** ✅ | Frontend: run form, progress, table, CSV export | 4–5 d |
 | **6** ✅ | Directory modules (BusinessList, UrduPoint) — **built; measured at zero yield, see §5.3** | 2–3 d |
 | **7** | Vertical modules (PakPlay, Turfy, Zameen click-reveal, Foodpanda) | 4–5 d |
-| **8** | FB/IG Tiers 2–3 (SERP + bio-link follow) | 3–4 d |
+| **8** ✅ | FB/IG **Tier 3 only** — rendered, not fetched. Tier 2 measured and deferred, see §6.7 | 3–4 d |
 | **9** | Person attribution engine | 3–4 d |
 | **10** | Meta API cutover (start review at Phase 1) | 1–2 d + review wait |
 
@@ -1182,6 +1395,18 @@ The "4–5 d" estimate was for **four separate deliverables plus two**, and the 
 **Note — Phase 6 complete, Aug 2026, and it is the first phase that shipped a negative result.** §5.3's horizontal directories are built (`sources/businesslist.py`, `services/directories.py`) and measured across four live slices at **7 matches from 333 listings and 0 contacts added**. Three of §5.3's four sources were refused on recon and recorded in `taxonomy.EXCLUDED_SOURCES` — including **UrduPoint, which this table names in the Phase 6 row**: it holds 4% mobiles and 0% owner names over its 21 Lahore restaurant records, at 171 KB and one request each. So the row above is delivered, and what it delivered is the knowledge that this branch is not worth extending. §5.3 carries the full measurement and the two rejected remedies (widening the geo radius; inserting unmatched rows as discovery).
 
 **The ordering question this raises, stated plainly.** §16's phase table puts directories at 6 and verticals at 7, and this section's "Validation before scaling" says to tune the weights against ground truth *before* building more source modules. Phase 6 was built ahead of that validation and returned nothing — which is weak evidence for the validation-first argument, and strong evidence for a narrower claim: **the binding constraint on a new source is whether its records can be joined to the ones we have.** Directories fail on the join, not on the data. §5.4's PakPlay ships Maps' own `place_id` in its venue-page iframe, so it joins through §10.1's tier 2 with no name ratio and no distance test. That is the property to select for when choosing what to build next.
+
+**Note — Phase 8 complete, Aug 2026, and it is the first phase that reconned before it built.** §6 carried no correction notes at all, so `scripts/spike_social.py` measured every claim in it before a line of the module was written. §6.7 holds the numbers. Three of §6's factual claims about the markup were wrong and the fourth — the one that matters — was right: the number really is one hop away on a page with no wall, but the page must be **rendered**, not fetched.
+
+**What this row delivered, against what it promises.** The table above says "Tiers 2–3". Only **Tier 3** was built (`sources/social.py`, `services/social.py`), and Facebook is read before Instagram, which is the reverse of §6's own ordering — §6.7 measured 58% of rendered FB Pages carrying a WhatsApp button against 10% of IG profiles, and this stage exists to produce `confirmed`.
+
+**Tier 2 was measured and deliberately deferred, which is different from unbuilt.** A targeted `site:instagram.com "<name>" <city>` returns the right profile **6 times in 20**, and a name-similarity join is unusable for filtering it — 11 of 20 top hits score ≥88 while only 6 are the right profile, because `instagram.com/popular/<slug>` and `/p/` permalinks carry the business name too. A bare-handle-only filter gets 6 correct out of 7 accepted at 30% recall. That is a workable feeder, but §6.7 also found a free one: **6 of 12 Facebook Pages link their own Instagram account**, needing no credits, no name matching and no join test. Ship Tier 3 against the social URLs already held, measure what it yields, and revisit Tier 2 with that number in hand. The Serper key and its 2,500 credits are in place either way.
+
+**§6.4's bio-hub branch does not exist in this market.** §6.4 says a bio link is "virtually always" a Linktree/beacons.ai hub carrying a WhatsApp button, and builds its whole pipeline diagram around that. Across 32 rendered profiles, **zero** bio links were a link-in-bio hub. The real distribution is stores (15), other social profiles (8), `wa.me` (2), nothing (7) — so no hub-follower was built, and a store bio-link gap-fills `business.website` for §5.2 to pick up instead. This is the §5.3 lesson in a second place: the branch a section spends its prose on is not always the branch the data uses.
+
+**Tier 4 (§6.5, the operator queue) was not built** and is not started. It is UI work, capped at 20 per run, and `operator_queue_cap` has been in `config.Settings` since Phase 1 with no reader.
+
+**What it yielded, live.** §6.8 has the table; the short version is that businesses holding a `confirmed` WhatsApp number went **4 → 9** on Lahore × salon, **13 → 20** on Lahore × food and **28 → 30** on Islamabad × salon, plus 36 websites gap-filled for §5.2 to crawl on a later pass. This is the first source module since §5.2 to add anything, and unlike Phase 6 it was ordered by a measurement rather than by the table above. Four defects were found *by running it* — a double-encoded Facebook link shim, a breaker that treated an ordinary empty Page as a broken selector, a WhatsApp number left unclassified and therefore unqualifiable, and a cached shell that would have blocked its own retry for 30 days. Each is now pinned by a test; three of them failed silently, which is the §5.5 pattern one layer below where §5.5 expects it.
 
 ### Validation before scaling
 

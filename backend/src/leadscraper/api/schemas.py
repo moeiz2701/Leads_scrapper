@@ -117,6 +117,11 @@ class EstimateRequest(BaseModel):
     synonym_limit: int | None = Field(default=None, ge=1, le=20)
     tile_limit: int | None = Field(default=None, ge=1, le=40)
     enrich: bool = True
+    # §6 Stage 3, off by default like the toggles themselves (§6.6). It is a
+    # separate flag rather than folded into ``enrich`` because it dominates the
+    # runtime when on — the social pass on Lahore × food is ~45 minutes against
+    # ~12 for discovery — and Screen 1 must not quote a number that omits it.
+    social: bool = False
 
 
 class ResultsResponse(BaseModel):
