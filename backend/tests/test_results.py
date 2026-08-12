@@ -14,6 +14,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from leadscraper.core import batches
 from leadscraper.db.models import Business, Contact, DoNotContact, Run
 from leadscraper.enums import (
     ContactKind,
@@ -308,6 +309,205 @@ def test_has_website_splits_the_run_into_two_halves_that_add_back_up(
     assert names(False) == ["Blank", "Has None"]
     assert names(None) == ["Blank", "Has None", "Has One"]
     assert sorted(names(True) + names(False)) == names(None)
+
+
+# --------------------------------------------------------------------------- #
+# Outreach batches (_BATCH_SPEC.md)
+# --------------------------------------------------------------------------- #
+
+
+def _food(session: Session, run: Run, name: str, **overrides) -> Business:
+    """A food business with one `likely` mobile — batchable by default."""
+    base = dict(category="food", subcategory="Restaurant", review_count=800, rating=4.5)
+    business = _business(
+        session, run, name=name, name_norm=name.lower(), **{**base, **overrides}
+    )
+    _phone(session, business)
+    return business
+
+
+@requires_db
+def test_the_batch_filter_narrows_the_table_to_one_message(db_session: Session):
+    run = _run(db_session, category="food")
+    _food(db_session, run, "No Site")
+    _food(db_session, run, "Sited", website="https://sited.pk")
+    _food(db_session, run, "Cafe", subcategory="Cafe")
+
+    page = fetch_results(
+        db_session,
+        ResultQuery(run_ids=(run.id,), batches=(batches.DELIVERY_NOSITE,)),
+    )
+    assert [r["business_name"] for r in page.rows] == ["No Site"]
+    assert page.rows[0]["_batch"] == batches.DELIVERY_NOSITE
+
+
+@requires_db
+def test_the_counts_describe_the_whole_view_not_the_filtered_slice(
+    db_session: Session,
+):
+    """The picker is the only place the operator sees how a run divides up.
+
+    Counting after the batch filter would leave every option but the selected one
+    reading 0, which makes the picker useless for the decision it exists to
+    support — "what am I working next?".
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "No Site")
+    _food(db_session, run, "Sited", website="https://sited.pk")
+    _food(db_session, run, "Quiet", review_count=12)
+
+    unfiltered = fetch_results(db_session, ResultQuery(run_ids=(run.id,)))
+    filtered = fetch_results(
+        db_session,
+        ResultQuery(run_ids=(run.id,), batches=(batches.DELIVERY_NOSITE,)),
+    )
+
+    assert filtered.total == 1
+    assert filtered.batch_counts == unfiltered.batch_counts
+    assert filtered.batch_counts[batches.DELIVERY_SITE] == 1
+    assert filtered.batch_counts[batches.EARLY_STAGE] == 1
+
+
+@requires_db
+def test_the_batches_partition_the_run_exhaustively(db_session: Session):
+    """Every visible row is in exactly one batch, and the counts add up.
+
+    This is the property the whole cascade exists for: a business in two batches
+    gets messaged twice, and one in none never gets messaged at all. Asserted
+    against the unfiltered total rather than eyeballed, the way the `has_website`
+    split is.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Delivery No Site")
+    _food(db_session, run, "Delivery Site", website="https://a.pk")
+    _food(db_session, run, "Cafe No Site", subcategory="Cafe")
+    _food(db_session, run, "Cafe Site", subcategory="Cafe", website="https://b.pk")
+    _food(db_session, run, "Poorly Rated", rating=3.2)
+    _food(db_session, run, "Quiet", review_count=8)
+    _business(db_session, run, name="Unreachable", category="food", review_count=900)
+
+    page = fetch_results(db_session, ResultQuery(run_ids=(run.id,)))
+
+    assert page.total == 7
+    assert sum(page.batch_counts.values()) == page.total
+    assert page.batch_counts == {
+        batches.DELIVERY_NOSITE: 1,
+        batches.DELIVERY_SITE: 1,
+        batches.CAFE_NOSITE: 1,
+        batches.CAFE_SITE: 1,
+        batches.REPUTATION: 1,
+        batches.EARLY_STAGE: 1,
+        batches.NO_WHATSAPP: 1,
+        batches.UNBATCHED: 0,
+    }
+
+
+@requires_db
+def test_a_non_food_run_is_entirely_unbatched(db_session: Session):
+    """Seven zeroes and an explanation, rather than seven plausible batches.
+
+    The thresholds and the dine-in list came off one Lahore × food scrape. Run a
+    salon through them and it lands in `delivery-nosite`, whose message argues
+    about Foodpanda's commission — a real-looking label that would be sent.
+    """
+    run = _run(db_session, category="salon")
+    _phone(db_session, _business(db_session, run, category="salon", review_count=800))
+
+    page = fetch_results(db_session, ResultQuery(run_ids=(run.id,)))
+
+    assert page.rows[0]["_batch"] == batches.UNBATCHED
+    assert page.batch_counts[batches.UNBATCHED] == 1
+    assert all(page.batch_counts[slug] == 0 for slug in batches.SLUGS)
+
+
+@requires_db
+def test_a_suppressed_number_moves_a_business_into_no_whatsapp(db_session: Session):
+    """§15 first, then the cascade — in that order, and it matters.
+
+    Assigning before suppression would file this business under `delivery-nosite`
+    on the strength of a number §15 says never to ring, and then hand the
+    operator a batch whose clipboard comes back one short with no explanation.
+    Its landline survives, so the row itself stays — a business with a number
+    nobody may WhatsApp is exactly what `no-whatsapp` is for, and §5 of the spec
+    routes it to email or a visit rather than deleting it.
+    """
+    run = _run(db_session, category="food")
+    business = _food(db_session, run, "Silenced")
+    _phone(
+        db_session,
+        business,
+        line_type=LineType.LANDLINE,
+        wa_label=WhatsAppLabel.NO,
+        rank=2,
+    )
+    _suppress(
+        db_session,
+        value_e164=business.contacts[0].value_e164,
+        reason="removal request",
+    )
+
+    page = fetch_results(db_session, ResultQuery(run_ids=(run.id,)))
+
+    assert page.total == 1
+    assert page.rows[0]["_batch"] == batches.NO_WHATSAPP
+    assert page.rows[0]["_wa_number"] is None
+
+
+@requires_db
+def test_the_derived_number_is_the_one_the_batch_would_message(db_session: Session):
+    run = _run(db_session, category="food")
+    business = _food(db_session, run, "Paragon")
+    confirmed = _phone(
+        db_session, business, wa_label=WhatsAppLabel.CONFIRMED, rank=2
+    )
+
+    page = fetch_results(db_session, ResultQuery(run_ids=(run.id,)))
+
+    assert page.rows[0]["_wa_number"] == confirmed.value_e164
+    assert page.rows[0]["_wa_confidence"] == WhatsAppLabel.CONFIRMED
+
+
+@requires_db
+def test_send_rank_orders_each_batch_by_review_count(db_session: Session):
+    """§6 — "highest-value prospects get contacted while the number is freshest".
+
+    Ranked *within* the batch, so two businesses in different batches can both be
+    #1, and independent of the table's sort: the pull is the table, so this
+    numbering informs the operator rather than quietly reordering what they are
+    about to extract.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Busy", review_count=2_000)
+    _food(db_session, run, "Middling", review_count=900)
+    _food(db_session, run, "Cafe", subcategory="Cafe", review_count=300)
+
+    page = fetch_results(
+        db_session, ResultQuery(run_ids=(run.id,), sort="business_name")
+    )
+    ranks = {r["business_name"]: (r["_batch"], r["_send_rank"]) for r in page.rows}
+
+    assert ranks["Busy"] == (batches.DELIVERY_NOSITE, 1)
+    assert ranks["Middling"] == (batches.DELIVERY_NOSITE, 2)
+    # A different batch numbers from 1 again — it is a send order, not a rank in
+    # the table.
+    assert ranks["Cafe"] == (batches.CAFE_NOSITE, 1)
+
+
+@requires_db
+def test_an_unknown_batch_token_yields_no_rows_rather_than_all_of_them(
+    db_session: Session,
+):
+    """Failing open would *widen* the view.
+
+    A typo that quietly matched everything would present a whole run as one
+    batch — and then get it extracted under a single message. The API rejects
+    unknown tokens outright; this pins the layer beneath that guard.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Paragon")
+
+    page = fetch_results(db_session, ResultQuery(run_ids=(run.id,), batches=("B99",)))
+    assert page.total == 0
 
 
 # --------------------------------------------------------------------------- #

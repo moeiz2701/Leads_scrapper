@@ -24,6 +24,14 @@ Four things happen here that are not in the §11 schema:
 * **The extraction mark.** Every row carries ``_extracted``, read from the
   ledger in ``extractions``. It is a decoration, never a filter applied here —
   hiding an extracted row would silently shrink the table and the CSV with it.
+* **The outreach batch** (``core/batches.py``, _BATCH_SPEC.md). Every row carries
+  ``_batch``, and the page carries ``batch_counts`` for the *whole* view rather
+  than for the filtered slice — so selecting one batch never hides how big the
+  others are. It is assigned after suppression, because a business whose only
+  WhatsApp number §15 removed is a business in `no-whatsapp`. The cascade covers
+  ``food`` only; every other category's rows carry ``unbatched`` and are counted
+  under it, rather than being pushed through thresholds nobody has measured for
+  them.
 
 Filtering below the run level happens in Python rather than SQL. That is a
 deliberate trade: the contact-level predicates are defined over the *exported*
@@ -45,6 +53,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from leadscraper.core import batches
 from leadscraper.core.textnorm import registrable_domain
 from leadscraper.db.models import Business, Contact, DoNotContact, Extraction, Run
 from leadscraper.enums import ContactKind
@@ -81,6 +90,11 @@ class ResultQuery:
     # business without one is the one where §6's social pass is the only route
     # to a `confirmed` label that will ever exist.
     has_website: bool | None = None
+    # _BATCH_SPEC.md's cascade, as a filter. Slugs (or ``B0N`` ids) — empty is
+    # "every batch". This is the *major* segmentation of the table: unlike the
+    # filters around it, the batches partition the view rather than narrowing it,
+    # so selecting several of them is a union that never double-counts a row.
+    batches: tuple[str, ...] = ()
     min_score: int | None = None
     line_types: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
@@ -125,6 +139,14 @@ class ResultPage:
     collapsed: int = 0
     cities: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
+    # Every batch's size in this view, **before** the batch filter narrowed it,
+    # and every token is present even at 0 — including `unbatched`. The picker is
+    # the only place the operator sees how the run divides up, so a batch that
+    # turns out to be empty has to say "0" rather than vanish from the list — an
+    # absent option reads as a broken filter, and a run with no `cafe-site`
+    # businesses is a finding. On a non-food run every count is 0 except
+    # `unbatched`, which is the honest picture: the cascade is food-only.
+    batch_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,8 +250,16 @@ def fetch_results(session: Session, query: ResultQuery) -> ResultPage:
         entries = _collapse_on_place_id(entries)
         page.collapsed = before - len(entries)
 
+    # After the collapse, so a business that appears in four runs is counted in
+    # its batch once rather than four times, and the counts add up to the number
+    # on screen.
+    _assign_batches(entries)
+    page.batch_counts = _count_batches(entries)
+    entries = _filter_batches(entries, query.batches)
+
     sort_key = _sort_key(query.sort, query.descending)
     entries.sort(key=lambda entry: sort_key(entry.row), reverse=query.descending)
+    _assign_send_ranks(entries)
 
     page.total = len(entries)
     ordered_rows = [entry.row for entry in entries]
@@ -355,6 +385,89 @@ def _national_digits(value: str) -> str:
     if digits.startswith("92"):
         return digits[2:]
     return digits.removeprefix("0")
+
+
+# --------------------------------------------------------------------------- #
+# Outreach batches (_BATCH_SPEC.md)
+# --------------------------------------------------------------------------- #
+
+
+def _assign_batches(entries: Sequence[ResultEntry]) -> None:
+    """Stamp every row with its batch and the number that batch would message.
+
+    Underscore-prefixed, like ``_extracted``: these are decorations on the §12.1
+    projection and not new columns in it. §12.1's set is the CSV contract and its
+    41 columns are asserted against the doc — a batch column would change the
+    file every downstream consumer already parses. Filtering to one batch and
+    exporting gives that batch's rows, which is the operator's actual ask.
+    """
+    for entry in entries:
+        assignment = batches.assign(entry.business, entry.contacts)
+        entry.row["_batch"] = assignment.batch
+        # §2's derived fields, carried so the screen and the ledger can show the
+        # number this business would actually be messaged on rather than making
+        # the operator read it off four phone columns.
+        entry.row["_wa_number"] = assignment.wa_number
+        entry.row["_wa_confidence"] = assignment.wa_confidence
+
+
+def _count_batches(entries: Sequence[ResultEntry]) -> dict[str, int]:
+    counts = dict.fromkeys(batches.FILTER_TOKENS, 0)
+    for entry in entries:
+        slug = entry.row.get("_batch")
+        if slug in counts:
+            counts[slug] += 1
+    return counts
+
+
+def _filter_batches(
+    entries: list[ResultEntry], tokens: Sequence[str]
+) -> list[ResultEntry]:
+    """Keep only the requested batches. Empty means every batch.
+
+    An unresolvable token yields **no rows**, never all of them. The filter
+    arrives from a query string, and a typo that silently widened the view from
+    one batch to the whole run would be read as "this batch is enormous" — and
+    then extracted.
+    """
+    if not tokens:
+        return entries
+    wanted = {token for token in map(batches.resolve_token, tokens) if token}
+    return [entry for entry in entries if entry.row.get("_batch") in wanted]
+
+
+def _assign_send_ranks(entries: Sequence[ResultEntry]) -> None:
+    """§6's ``send_rank`` — position within the batch, by review_count desc.
+
+    ``unbatched`` rows are ranked among themselves too. It is not a send order
+    there — nothing sends `unbatched` — but the numbering is harmless and the
+    alternative is a blank column whose blankness means something different from
+    every other blank on the screen.
+
+    "Highest-value prospects get contacted while the number is freshest." It is a
+    property of the *current view*, not of the run: filter the table down and the
+    ranks renumber, because the operator is going to work the list in front of
+    them. Missing ``review_count`` sorts last rather than first, for §10.2's
+    reason — unknown volume is not zero volume, and it is not high volume either.
+
+    This does **not** reorder the table. The pull is the table (§12.2), so a
+    covert re-sort here would make the Extract button hand out a different set
+    from the one on screen; the operator sorts by ``review_count`` to work a batch
+    in send order, and the rank is there to confirm they did.
+    """
+    ordered: dict[str, list[ResultEntry]] = {}
+    for entry in entries:
+        ordered.setdefault(str(entry.row.get("_batch")), []).append(entry)
+
+    for group in ordered.values():
+        group.sort(
+            key=lambda e: (
+                e.row.get("review_count") is None,
+                -(e.row.get("review_count") or 0),
+            )
+        )
+        for position, entry in enumerate(group, start=1):
+            entry.row["_send_rank"] = position
 
 
 # --------------------------------------------------------------------------- #

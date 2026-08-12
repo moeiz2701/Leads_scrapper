@@ -8,6 +8,18 @@ A Pakistan local-business lead scraper. Discovers businesses by city + category 
 extracts contactable numbers, prioritising WhatsApp-capable mobiles attributed to a
 named owner where the public record supports it.
 
+## Two specs, and they cover different things
+
+[implementation.md](implementation.md) is the pipeline: how a business is found,
+enriched, scored and exported. [_BATCH_SPEC.md](_BATCH_SPEC.md) is the outreach
+layer on top of it: which of seven mutually exclusive **batches** a lead falls
+into, and therefore which message it gets. It is the results table's major
+filter. Its §0 records what was built, the three departures from its prose, and
+its scope — **the cascade is calibrated on `food` and routes nothing else**;
+every other category resolves to `unbatched`, which is not a batch and is never a
+send target. Widening that is a measurement (percentiles for the new vertical),
+never an edit to a category list.
+
 ## The design document is the source of truth
 
 **[implementation.md](implementation.md) is the spec, and the code references it by
@@ -40,7 +52,7 @@ docker compose up -d
 
 cd backend
 uv sync                       # see the Playwright warning below
-uv run alembic upgrade head   # migrations; head is c7f1a4be2d19
+uv run alembic upgrade head   # migrations; head is 4e2b8c05af31
 uv run pytest                 # full suite
 uv run pytest tests/test_social.py::test_a_429_stops_the_module_for_the_run  # one test
 uv run ruff check .           # lint — must stay clean
@@ -77,6 +89,10 @@ uv run python scripts/run_social.py --latest        # Stage 3, §6 social
 uv run python scripts/run_scoring.py --latest [--preference whatsapp_only]
 ```
 
+```bash
+uv run python scripts/spike_batches.py   # read-only: the batch split of every run
+```
+
 `run_scoring.py` is pure DB work, needs no network, and is safe to re-run.
 
 ## Architecture
@@ -98,7 +114,8 @@ The layering is consistent and worth matching when adding a source:
 - `core/` — pure functions, no network, no DB. `phone.py` (§9.1/9.2), `whatsapp.py`
   (§9.3 evidence scoring), `webparse.py` (one HTML page → wa.me, widgets, `tel:`,
   JSON-LD, socials), `site_evidence.py` (a domain's pages → scored findings), `cache.py`
-  (§7 content-addressed archive), `pacing.py`, `geo.py`, `scoring.py`, `textnorm.py`.
+  (§7 content-addressed archive), `pacing.py`, `geo.py`, `scoring.py`,
+  `textnorm.py`, `batches.py` (_BATCH_SPEC's cascade — food only).
 - `sources/` — one module per external source. Cache-first fetch, own circuit breaker,
   own pacing policy. Parsing is a pure function taking `(url, body)` so it is testable
   from a string literal.
@@ -106,7 +123,10 @@ The layering is consistent and worth matching when adding a source:
   reference implementation; `social.py` and `directories.py` follow it.
 - `export/` — §12.1's 41 columns as data, one business+contacts → one row (pure).
 - `api/` — FastAPI. `deps.py` holds the §13 filter bar shared by table, export
-  **and extraction**.
+  **and extraction** — including the `batch` filter, which is validated against
+  the catalogue and 422s on an unknown token rather than failing open like the
+  others (failing open would *widen* the view and get a whole run extracted
+  under one message).
 
 **`config.py` is the only reader of `os.environ`.** Everything tunable resolves through
 `Settings`.
@@ -139,6 +159,14 @@ data, and most are pinned by a test.
   a filter, add it to `services/results.py`, never to an endpoint. Extraction reads the
   same query for the same reason and takes its filters from the *query string*, not from
   its POST body — a body that re-declared them would be a second place to drift.
+- **A batch is assigned once, after §15, and recorded when it is sent.** The
+  cascade runs on the *visible* contact set, so a business whose only WhatsApp
+  number was suppressed is in `no-whatsapp` rather than in a send batch whose
+  clipboard comes up short. `extractions.batch` stores what it was at pull time:
+  a business that later gains a website moves batch, and the record of which
+  message already went out must not move with it. NULL there means "not
+  recorded" (pre-migration); `"unbatched"` means "no definition covers this
+  category" — different facts, stored differently.
 - **Extraction marks, it does not suppress.** `do_not_contact` (§15) says "never contact
   this"; `extractions` says "already sent". Clearing an entry puts the business back in
   the queue. Neither table is read or written from the other's code, and a pull writes no

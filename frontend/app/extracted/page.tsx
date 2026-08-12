@@ -17,6 +17,12 @@
  *     business row, no contact, no `do_not_contact` entry is touched. That is
  *     said on screen, because "clear" next to a delete button that *does* write
  *     a permanent suppression is exactly the confusion worth pre-empting.
+ *
+ * The batch filter is the third: "what did I already send the Commission Escape
+ * message to?" is the question that decides what today's pull can say, and it
+ * has to be answerable per run and per batch. It matches on the batch **recorded
+ * at pull time**, so a business that has since gained a website still appears
+ * under the batch it was actually messaged in.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -24,6 +30,7 @@ import Link from "next/link";
 import {
   api,
   copyToClipboard,
+  type BatchCatalogue,
   type ExtractionEntry,
   type RunSummary,
 } from "@/lib/api";
@@ -31,22 +38,29 @@ import {
 export default function ExtractedScreen() {
   const [entries, setEntries] = useState<ExtractionEntry[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [catalogue, setCatalogue] = useState<BatchCatalogue | null>(null);
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [runFilter, setRunFilter] = useState<string>("");
+  const [batchFilter, setBatchFilter] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
+    const runIds = runFilter ? [runFilter] : [];
     api
-      .extractions(runFilter ? [runFilter] : [])
+      .extractions(runIds, batchFilter ? [batchFilter] : [])
       .then((rows) => {
         setEntries(rows);
         setError(null);
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [runFilter]);
+    // Unscoped by batch on purpose: these are what the filter is choosing
+    // between, so narrowing them would leave every option but one reading 0.
+    api.extractionCounts(runIds).then(setCounts).catch(() => setCounts({}));
+  }, [runFilter, batchFilter]);
 
   useEffect(() => {
     load();
@@ -54,11 +68,16 @@ export default function ExtractedScreen() {
 
   useEffect(() => {
     api.listRuns().then(setRuns).catch((e) => setError(String(e)));
+    api.batches().then(setCatalogue).catch((e) => setError(String(e)));
   }, []);
 
   const numbers = useMemo(
     () => [...new Set(entries.flatMap((e) => e.numbers))],
     [entries],
+  );
+  const total = useMemo(
+    () => Object.values(counts).reduce((sum, n) => sum + n, 0),
+    [counts],
   );
 
   async function clearOne(entry: ExtractionEntry) {
@@ -75,9 +94,20 @@ export default function ExtractedScreen() {
   }
 
   async function clearAll() {
-    const scope = runFilter
-      ? "this run's extracted list"
-      : "the whole extracted list";
+    // Names both scopes, because the button clears exactly what is listed — a
+    // clear that quietly ignored the batch filter would retract 130 sends from a
+    // screen showing 22.
+    const batchName = batchFilter
+      ? (catalogue?.batches.find((b) => b.slug === batchFilter)?.name ??
+        "unbatched")
+      : null;
+    const scope = [
+      batchName ? `the ${batchName} batch of` : null,
+      runFilter ? "this run's extracted list" : "the whole extracted list",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
     if (
       !window.confirm(
         `Clear ${scope} (${entries.length} entr${entries.length === 1 ? "y" : "ies"})?\n\n` +
@@ -89,7 +119,10 @@ export default function ExtractedScreen() {
       return;
     }
     try {
-      const result = await api.clearExtractions(runFilter ? [runFilter] : []);
+      const result = await api.clearExtractions(
+        runFilter ? [runFilter] : [],
+        batchFilter ? [batchFilter] : [],
+      );
       setNotice(`Cleared ${result.cleared} entr${result.cleared === 1 ? "y" : "ies"}.`);
       load();
     } catch (e) {
@@ -121,6 +154,29 @@ export default function ExtractedScreen() {
               ))}
             </select>
           </div>
+          <div
+            className="field"
+            style={{ flex: "1 1 300px" }}
+            title="Matches the batch recorded when the pull happened, so a business that has moved batch since still appears under the message it actually got."
+          >
+            <label>Outreach batch</label>
+            <select
+              value={batchFilter}
+              onChange={(e) => setBatchFilter(e.target.value)}
+            >
+              <option value="">every batch — {total} extracted</option>
+              {(catalogue?.batches ?? []).map((b) => (
+                <option key={b.slug} value={b.slug}>
+                  {b.id} · {b.name} — {counts[b.slug] ?? 0}
+                </option>
+              ))}
+              {catalogue && (
+                <option value={catalogue.unbatched_slug}>
+                  no batch defined — {counts[catalogue.unbatched_slug] ?? 0}
+                </option>
+              )}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -147,7 +203,7 @@ export default function ExtractedScreen() {
           Copy all numbers
         </button>
         <button className="danger" onClick={clearAll} disabled={entries.length === 0}>
-          Clear {runFilter ? "this run" : "all"}
+          Clear {entries.length} listed
         </button>
       </div>
 
@@ -156,12 +212,13 @@ export default function ExtractedScreen() {
           <thead>
             <tr>
               <th>business</th>
+              <th>batch</th>
               <th>city</th>
               <th className="num">score</th>
               <th>website</th>
               <th>numbers sent</th>
               <th>extracted_at</th>
-              <th>batch</th>
+              <th>pull</th>
               <th style={{ width: 70 }} />
             </tr>
           </thead>
@@ -169,6 +226,9 @@ export default function ExtractedScreen() {
             {entries.map((entry) => (
               <tr key={entry.id}>
                 <td>{entry.business_name ?? <span className="muted">—</span>}</td>
+                <td className="small">
+                  <LedgerBatch entry={entry} catalogue={catalogue} />
+                </td>
                 <td>{entry.city ?? <span className="muted">—</span>}</td>
                 <td className="num mono">
                   {entry.lead_score ?? <span className="muted">—</span>}
@@ -194,7 +254,11 @@ export default function ExtractedScreen() {
                 <td className="small mono muted">
                   {entry.extracted_at?.slice(0, 19).replace("T", " ") ?? "—"}
                 </td>
-                <td className="small muted">top {entry.batch_size ?? "—"}</td>
+                <td className="small muted">
+                  {/* NULL batch_size is an "extract all" pull, not a missing
+                      value — the size was "everything that was left". */}
+                  {entry.batch_size ? `top ${entry.batch_size}` : "all"}
+                </td>
                 <td style={{ textAlign: "right" }}>
                   <button
                     className="small"
@@ -208,10 +272,13 @@ export default function ExtractedScreen() {
             ))}
             {entries.length === 0 && !loading && (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <span className="muted">
-                    Nothing extracted yet. Use <b>Extract</b> on the results table
-                    to pull the top 30, 50 or 100 of whatever is filtered there.
+                    {batchFilter
+                      ? "Nothing from this batch has been extracted yet."
+                      : "Nothing extracted yet."}{" "}
+                    Use <b>Extract</b> on the results table to pull the top 30, 50
+                    or 100 — or all of it — of whatever is filtered there.
                   </span>
                 </td>
               </tr>
@@ -219,6 +286,66 @@ export default function ExtractedScreen() {
           </tbody>
         </table>
       </div>
+    </>
+  );
+}
+
+/**
+ * Which batch this business was messaged in.
+ *
+ * Two facts, and the difference between them matters. `batch` is what was
+ * recorded at pull time — the message that actually went out. `current_batch` is
+ * where the cascade puts the business today. They diverge when a later run finds
+ * a website or the review count crosses 200, and a follow-up that assumed the
+ * current batch would repeat the wrong pitch. So the recorded one is what is
+ * shown, and a move is flagged rather than smoothed over.
+ *
+ * A row pulled before the column existed has no recorded batch at all; it falls
+ * back to the current one and says so, because inventing history for it would be
+ * worse than admitting we did not record it.
+ */
+function LedgerBatch({
+  entry,
+  catalogue,
+}: {
+  entry: ExtractionEntry;
+  catalogue: BatchCatalogue | null;
+}) {
+  const slug = entry.batch ?? entry.current_batch;
+  const spec = catalogue?.batches.find((b) => b.slug === slug);
+  const moved =
+    entry.batch && entry.current_batch && entry.batch !== entry.current_batch;
+  const movedTo = catalogue?.batches.find((b) => b.slug === entry.current_batch);
+
+  if (!spec) {
+    return (
+      <span className="muted" title="The cascade has no definitions for this category.">
+        —
+      </span>
+    );
+  }
+  return (
+    <>
+      <span
+        className="badge likely"
+        title={
+          entry.batch
+            ? `${spec.name} — recorded when this pull happened.`
+            : `${spec.name} — derived now: this row was pulled before the batch was recorded.`
+        }
+      >
+        {spec.id}
+        {!entry.batch && <span className="muted"> ?</span>}
+      </span>
+      {moved && (
+        <span
+          className="muted small"
+          title="This business has moved batch since it was messaged — a later run changed one of the cascade's inputs. The message it got was the one above."
+        >
+          {" "}
+          → {movedTo?.id ?? entry.current_batch}
+        </span>
+      )}
     </>
   );
 }

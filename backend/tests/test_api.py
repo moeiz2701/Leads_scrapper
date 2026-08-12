@@ -531,6 +531,129 @@ def test_clearing_the_ledger_leaves_the_results_table_intact(
     assert client.get("/api/do-not-contact").json() == []
 
 
+# --------------------------------------------------------------------------- #
+# Outreach batches (_BATCH_SPEC.md)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_batch_catalogue_is_served_rather_than_hard_coded(client: TestClient):
+    """§4.2's rule, applied to a second vocabulary.
+
+    A batch list typed into TypeScript would be the fastest way to have the UI
+    offer a filter the backend rejects. The response also carries the *limit* of
+    the layer — `categories` is food alone — because a picker showing seven
+    empty batches on a salon run looks broken, and the reason is a fact about the
+    spec rather than about the data.
+    """
+    body = client.get("/api/meta/batches").json()
+
+    assert [b["id"] for b in body["batches"]] == [
+        "B01", "B02", "B03", "B04", "B06", "B05", "B00",
+    ]
+    assert body["categories"] == ["food"]
+    assert body["unbatched_slug"] == "unbatched"
+    assert body["note"]
+
+
+@requires_db
+def test_the_batch_filter_reaches_the_table_the_csv_and_the_clipboard(
+    client: TestClient, db_session: Session
+):
+    """One filter, three outputs — §12.2's invariant, extended to the batch.
+
+    The seeded run is a salon, so the whole thing is `unbatched`: this pins that
+    the token is a real filter on all three surfaces rather than a label the
+    table happens to render.
+    """
+    run = _seed(db_session)
+    params = {"run": str(run.id), "batch": "unbatched"}
+
+    table = client.get("/api/results", params=params).json()
+    assert table["total"] == 1
+    assert table["rows"][0]["_batch"] == "unbatched"
+    assert table["batch_counts"]["unbatched"] == 1
+    assert table["batch_counts"]["delivery-nosite"] == 0
+
+    csv = client.get(f"/api/runs/{run.id}/export.csv", params=params)
+    assert csv.headers["X-Leads-Total"] == "1"
+
+    pull = client.post("/api/extractions", params=params, json={"limit": 30}).json()
+    assert pull["marked"] == 1
+    assert pull["businesses"][0]["batch"] == "unbatched"
+
+
+@requires_db
+def test_a_batch_that_does_not_apply_returns_nothing_not_everything(
+    client: TestClient, db_session: Session
+):
+    run = _seed(db_session)
+    body = client.get(
+        "/api/results", params={"run": str(run.id), "batch": "cafe-site"}
+    ).json()
+    assert body["total"] == 0
+
+
+@requires_db
+def test_an_unknown_batch_is_refused_rather_than_ignored(
+    client: TestClient, db_session: Session
+):
+    """Every other filter here fails open; this one fails loud.
+
+    Ignoring an unknown token would *widen* the view — the whole run presented as
+    one batch, and then extracted under a single message.
+    """
+    run = _seed(db_session)
+    response = client.get(
+        "/api/results", params={"run": str(run.id), "batch": "B99"}
+    )
+    assert response.status_code == 422
+    assert "B99" in str(response.json()["detail"])
+
+
+@requires_db
+def test_extract_all_drains_the_view_and_the_ledger_says_which_batch(
+    client: TestClient, db_session: Session
+):
+    """"All" travels as a literal, not as an omitted limit."""
+    run = _seed(db_session)
+    body = client.post(
+        "/api/extractions", params={"run": str(run.id)}, json={"limit": "all"}
+    ).json()
+
+    assert body["marked"] == 1
+    assert body["requested"] is None
+
+    listed = client.get(
+        "/api/extractions", params={"run": str(run.id), "batch": "unbatched"}
+    ).json()
+    assert len(listed) == 1
+    assert listed[0]["batch"] == "unbatched"
+    # NULL batch_size is "everything that was left", not a missing value.
+    assert listed[0]["batch_size"] is None
+
+    counts = client.get("/api/extractions/counts", params={"run": str(run.id)}).json()
+    assert counts["unbatched"] == 1
+
+
+@requires_db
+def test_clearing_the_ledger_is_scoped_to_the_batch_being_shown(
+    client: TestClient, db_session: Session
+):
+    """A clear retracts exactly what the screen listed — see the service docstring."""
+    run = _seed(db_session)
+    client.post("/api/extractions", params={"run": str(run.id)}, json={"limit": "all"})
+
+    # A batch this row is not in clears nothing...
+    assert client.delete("/api/extractions", params={"batch": "cafe-site"}).json() == {
+        "cleared": 0
+    }
+    assert len(client.get("/api/extractions").json()) == 1
+    # ...and the batch it is in clears it.
+    assert client.delete("/api/extractions", params={"batch": "unbatched"}).json() == {
+        "cleared": 1
+    }
+
+
 @requires_db
 def test_the_website_filter_splits_a_run_without_losing_a_row(
     client: TestClient, db_session: Session

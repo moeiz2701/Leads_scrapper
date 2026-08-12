@@ -338,6 +338,7 @@ backend/
       geo.py                 §10.1 haversine + the blocking grid for dedupe
       scoring.py             §10.2 lead score, and what "missing" means to it
       ranking.py             §3.3 ranking by number_preference
+      batches.py             _BATCH_SPEC's outreach cascade — food only. Pure
     sources/
       google_maps.py         §5.1 grid fan-out, payload interception (Playwright)
       website.py             §5.2 cache-first crawler, 4 pages/domain (httpx)
@@ -382,39 +383,86 @@ frontend/                    §13's three screens + Settings (Next.js, TanStack)
   app/
     page.tsx                 Screen 1 — new run, and the honest estimate
     runs/[id]/page.tsx       Screen 2 — progress, source pills, cancel
-    results/page.tsx         Screen 3 — the table, website split, Extract, export, delete
-    extracted/page.tsx       the extraction ledger — inspect, clear one, clear all
+    results/page.tsx         Screen 3 — the table, batch filter, Extract, export, delete
+    extracted/page.tsx       the extraction ledger — per run and per batch, inspect, clear
     settings/page.tsx        §13 Settings, read-only
   lib/api.ts                 the backend as types; one filter → one query string
 ```
 
-## Working a run: the website split and Extract
+## Working a run: outreach batches and Extract
 
 Two controls on the results table that the design doc did not ask for, added
 because they are how the table is actually worked. Both are documented in §13
 Screen 3; the short version:
 
-**The website filter is three states — `any`, `has a website`, `no website on
-record`** — and it is a real split, not a cosmetic one. A business with a site is
-one §5.2 can raise to `confirmed`; a business without one is a business where
-§6's social pass is the only route to a `confirmed` label there will ever be, and
-§6.8 measured **97 businesses across the seven runs holding a social URL and no
-website at all**. A blank `website` counts as *no website*, so the two halves add
-back up to the run. The label says *on record* because nothing here proves the
-negative — it says no source published one.
+**The major filter is the outreach batch** ([_BATCH_SPEC.md](_BATCH_SPEC.md)),
+which replaced the has-a-website split as the table's primary segmentation in
+Aug 2026. They are not two filters at the same level: a website is one property,
+while a batch answers *which message does this business get* — and it contains
+the website distinction (`delivery-site` vs `delivery-nosite`). A cascade, not
+six independent predicates, because it must be **exhaustive and mutually
+exclusive**: overlapping sets are how a business gets messaged twice.
 
-**Extract → top 30 / 50 / 100** copies every `confirmed` and `likely` number off
-the top of the current filtered, sorted view — one per line — and marks those
-businesses on an extraction ledger so the next pull moves past them. The
-[Extracted](frontend/app/extracted/page.tsx) screen shows what has gone out and
-clears one entry, one run's worth, or all of it.
+| | batch | definition | Lahore × food |
+|---|---|---|---:|
+| B01 | `delivery-nosite` | delivery-capable · 200+ reviews · ≥4.0 · no site | 51 |
+| B02 | `delivery-site` | delivery-capable · 200+ reviews · ≥4.0 · has site | 78 |
+| B03 | `cafe-nosite` | dine-in/dessert · 200+ reviews · ≥4.0 · no site | 22 |
+| B04 | `cafe-site` | dine-in/dessert · 200+ reviews · ≥4.0 · has site | 36 |
+| B06 | `reputation` | 200+ reviews · rating <4.0 | 30 |
+| B05 | `early-stage` | <200 reviews, or unknown | 91 |
+| B00 | `no-whatsapp` | no WhatsApp-capable number — **do not send** | 120 |
+
+Those are the live counts, not the spec's: `scripts/spike_batches.py` reproduces
+§4's table exactly on the real run — 308 sendable of 428 — and the partition is
+asserted exhaustive rather than eyeballed.
+
+**The cascade covers `food` and nothing else.** Its thresholds came off one
+Lahore × food scrape, and its two heaviest branches are food-shaped. Every other
+category resolves to `unbatched`, which is not a batch — no message, no send
+priority, never a send target. All six salon runs (410 rows) are 100%
+`unbatched` today; routing them through food's rules instead would have pitched
+Foodpanda commission at hair salons. Defining another vertical means measuring
+its review-count percentiles, per §8 of the spec.
+
+**The website filter survives as a chip, not a control.** It is still three
+states — `any`, `has a website`, `no website on record` — still exhaustive, and
+still what Screen 2 deep-links into with `?website=yes|no`; it is also the only
+way to make that split on the six categories the cascade does not cover. A
+business with a site is one §5.2 can raise to `confirmed`; one without is a
+business where §6's social pass is the only route to a `confirmed` label there
+will ever be, and §6.8 measured **97 businesses across the seven runs holding a
+social URL and no website at all**. The label says *on record* because nothing
+proves the negative.
+
+**Extract → top 30 / 50 / 100, or all of it** copies every `confirmed` and
+`likely` number off the top of the current filtered, sorted view — one per line —
+and marks those businesses on an extraction ledger so the next pull moves past
+them. *All* exists because working a batch means draining it: two rounds of
+top-30 and a third that returns 11 is one pull said three times. It is a size and
+not a scope — it never reaches past the current filter — and it is spelled as a
+literal `"all"` so it cannot be arrived at by omitting a field. The
+[Extracted](frontend/app/extracted/page.tsx) screen shows what has gone out, per
+run **and per batch**, and clears exactly what it is showing.
 
 ```
-GET  /api/results?run=…&has_website=false      the table, one half of the run
-POST /api/extractions?run=…&has_website=false  the same query, top N, marked
-GET  /api/extractions[?run=…]                  the ledger
-DELETE /api/extractions/{id} | ?run=…          clear one | clear a run | clear all
+GET  /api/meta/batches                          the catalogue; the UI never hard-codes it
+GET  /api/results?run=…&batch=delivery-nosite   the table, one batch of the run
+POST /api/extractions?run=…&batch=…  {"limit":"all"}   the same query, drained, marked
+GET  /api/extractions[?run=…][&batch=…]         the ledger, filterable both ways
+GET  /api/extractions/counts[?run=…]            ledger size per batch
+DELETE /api/extractions/{id} | ?run=…&batch=…   clear one | clear exactly what is listed
 ```
+
+An unknown batch token is a **422**, where every other filter here fails open —
+failing open would *widen* the view, presenting a whole run as one batch and
+getting it extracted under a single message.
+
+The batch is recorded on the ledger row at pull time, beside the numbers and for
+the same reason: it is a record of what went out. A business that gains a website
+moves from `delivery-nosite` to `delivery-site`, and the answer to "what did I
+send the commission pitch to?" must not move with it. The Extracted screen shows
+the recorded batch and flags the move.
 
 Five things it will not do, each an existing rule of the project applied one
 output further along:
@@ -443,7 +491,7 @@ somebody once copied its number. The ledger stores the numbers **as sent**, not
 as they now stand: a later run raising a contact's §9.3 evidence must not
 rewrite the record of a message that has already gone out.
 
-### What both controls do on the seven live runs
+### What the website split does on the seven live runs
 
 Measured across all 898 businesses, then the ledger cleared and the counts
 verified back to their prior state:
@@ -577,7 +625,7 @@ the measurement.
 
 ## Departures from implementation.md
 
-Seven, all deliberate, all covered by a test that explains itself:
+Eight, all deliberate, all covered by a test that explains itself:
 
 1. **`businesses.place_id` is unique per run, not globally.** §11's `TEXT UNIQUE`
    would make a business scrapeable exactly once ever, so the second run of
@@ -606,6 +654,14 @@ Seven, all deliberate, all covered by a test that explains itself:
    with the recon that condemned each — UrduPoint carries 4% mobiles and 0%
    owner names at 171 KB per business, against §5.3's "clean field table, mostly
    `03xx`, has an owner-name field".
+
+8. **The outreach batch layer is not in implementation.md at all.** It comes
+   from [_BATCH_SPEC.md](_BATCH_SPEC.md) and sits on top of §13 Screen 3 as its
+   major filter, plus one nullable column on `extractions`. It departs from that
+   spec in three places too — all three are tabled in §0 of it, and the biggest
+   is that the cascade reads every ranked phone rather than §12.1's four export
+   slots, so `no-whatsapp` cannot contain a business the clipboard would still
+   hand out a number for.
 
 `do_not_contact` (§15) and `source_state` (§7) are also present; §15 requires the
 former in v1 but §11's SQL omits it. Both got their first reader and first writer

@@ -20,7 +20,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from leadscraper.api.deps import QueryDep, SessionDep
+from leadscraper.api.deps import QueryDep, SessionDep, parse_batches
 from leadscraper.api.schemas import (
     ExtractedBusinessOut,
     ExtractionCleared,
@@ -30,6 +30,7 @@ from leadscraper.api.schemas import (
 )
 from leadscraper.services.extraction import (
     UnsupportedBatchSize,
+    batch_counts,
     clear_extraction,
     clear_extractions,
     extract,
@@ -67,23 +68,61 @@ def create_extraction(
 def get_extractions(
     session: SessionDep,
     run: Annotated[list[uuid.UUID] | None, Query(description="repeatable")] = None,
+    batch: Annotated[
+        str | None,
+        Query(description="_BATCH_SPEC slugs, B0N ids or `unbatched`, comma-separated"),
+    ] = None,
     limit: Annotated[int | None, Query(ge=1, le=5_000)] = None,
 ) -> list[dict]:
-    return list_extractions(session, run or (), limit)
+    """The ledger — what has already gone out, optionally one batch of it.
+
+    ``batch`` matches on the batch **recorded at pull time**, falling back to the
+    business's current batch for rows pulled before the column existed. It reuses
+    the same tokens the results filter takes, so "show me `cafe-nosite`" means the
+    same thing on both screens.
+    """
+    return list_extractions(
+        session, run or (), limit, batch_tokens=parse_batches(batch)
+    )
+
+
+@router.get("/counts", response_model=dict[str, int])
+def get_extraction_counts(
+    session: SessionDep,
+    run: Annotated[list[uuid.UUID] | None, Query(description="repeatable")] = None,
+) -> dict[str, int]:
+    """How much of the ledger sits in each batch — the chips above the list.
+
+    Unfiltered by batch on purpose: these are what the filter is *choosing*
+    between, so scoping them to the current selection would leave every chip but
+    one reading 0.
+    """
+    return batch_counts(session, run or ())
 
 
 @router.delete("", response_model=ExtractionCleared)
 def delete_extractions(
     session: SessionDep,
     run: Annotated[list[uuid.UUID] | None, Query(description="repeatable")] = None,
+    batch: Annotated[
+        str | None,
+        Query(description="scope the clear to one batch, so it matches the list"),
+    ] = None,
 ) -> ExtractionCleared:
-    """Clear the whole ledger, or one run's worth of it.
+    """Clear the whole ledger, or one run's or one batch's worth of it.
 
     Nothing but ledger rows is deleted. The businesses, their contacts and the
     §15 suppression list are all untouched — the only claim being retracted is
     "these have already been sent".
+
+    ``batch`` takes the same tokens the list does, because the clear has to
+    delete exactly what the screen it was clicked from was showing.
     """
-    return ExtractionCleared(cleared=clear_extractions(session, run or ()))
+    return ExtractionCleared(
+        cleared=clear_extractions(
+            session, run or (), batch_tokens=parse_batches(batch)
+        )
+    )
 
 
 @router.delete("/{extraction_id}", status_code=status.HTTP_204_NO_CONTENT)

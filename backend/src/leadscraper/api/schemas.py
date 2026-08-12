@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -124,6 +124,38 @@ class EstimateRequest(BaseModel):
     social: bool = False
 
 
+class BatchInfo(BaseModel):
+    """One outreach batch of _BATCH_SPEC.md §4, for the picker.
+
+    Served rather than hard-coded in the frontend for the reason the city and
+    synonym vocabularies are: a second copy of the cascade's vocabulary in
+    TypeScript is the fastest way to have the UI name a batch the backend does
+    not have.
+    """
+
+    id: str
+    slug: str
+    name: str
+    definition: str
+    send_priority: int | None = None
+    sendable: bool = True
+    note: str
+
+
+class BatchCatalogue(BaseModel):
+    """The batch vocabulary, and the honest limits of it."""
+
+    batches: list[BatchInfo] = Field(default_factory=list)
+    # The reserved non-batch token. Named rather than assumed, so the UI does
+    # not carry the string "unbatched" as a literal.
+    unbatched_slug: str
+    # The categories the cascade has definitions for. One, today. The UI shows
+    # this so a salon operator is told the layer does not cover them yet rather
+    # than being shown seven empty batches and left to guess why.
+    categories: list[str] = Field(default_factory=list)
+    note: str
+
+
 class ResultsResponse(BaseModel):
     rows: list[dict[str, Any]]
     total: int
@@ -135,19 +167,28 @@ class ResultsResponse(BaseModel):
     collapsed: int = 0
     cities: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
+    # Slug → size, for the whole view *before* the batch filter. Lets the picker
+    # show what selecting a batch would cost without a second request per batch.
+    batch_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class ExtractionRequest(BaseModel):
-    """Extract → top N of the current view.
+    """Extract → top N of the current view, or all of it.
 
     The *filters* are not in this body — they arrive as the query string, read by
     the same ``result_query`` dependency the table and the CSV use. That is the
     point: "extract what I am looking at" and "export what I am looking at" have
     to mean the same thing, and they cannot if one of them re-declares the
-    filter set here.
+    filter set here. The outreach batch is a filter like any other, so it travels
+    in the query string too.
     """
 
-    limit: int = Field(description="30, 50 or 100 — services.extraction.BATCH_SIZES")
+    # No default. "All" has to be asked for by name — a limit that could be
+    # omitted into meaning "everything" is one dropped field away from draining
+    # the queue.
+    limit: int | Literal["all"] = Field(
+        description='30, 50 or 100 — services.extraction.BATCH_SIZES — or "all"'
+    )
 
 
 class ExtractedBusinessOut(BaseModel):
@@ -158,6 +199,7 @@ class ExtractedBusinessOut(BaseModel):
     lead_score: int | None = None
     website: str | None = None
     numbers: list[str] = Field(default_factory=list)
+    batch: str | None = None
 
 
 class ExtractionResponse(BaseModel):
@@ -169,7 +211,8 @@ class ExtractionResponse(BaseModel):
     clipboard: str = ""
     numbers: list[str] = Field(default_factory=list)
     businesses: list[ExtractedBusinessOut] = Field(default_factory=list)
-    requested: int = 0
+    # ``None`` = the pull was asked to drain the view rather than take a count.
+    requested: int | None = 0
     marked: int = 0
     skipped_already_extracted: int = 0
     without_numbers: int = 0
@@ -184,7 +227,14 @@ class ExtractionEntry(BaseModel):
     business_id: uuid.UUID
     run_id: uuid.UUID
     batch_id: uuid.UUID
+    # ``None`` = an "extract all" pull rather than a fixed top-N.
     batch_size: int | None = None
+    # Recorded at pull time. ``None`` on rows written before the column existed —
+    # not backfilled, because that would assert a fact about a past pull.
+    batch: str | None = None
+    # The cascade run against the business as it stands now. Diverges from
+    # ``batch`` when a later run moved the business, which is worth seeing.
+    current_batch: str | None = None
     numbers: list[str] = Field(default_factory=list)
     extracted_at: datetime | None = None
     business_name: str | None = None

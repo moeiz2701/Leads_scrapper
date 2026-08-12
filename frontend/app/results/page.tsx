@@ -4,9 +4,22 @@
  * §13 Screen 3 — Results Table.
  *
  * Sticky header, virtualised rows, sort any column (default `lead_score DESC`),
- * the six filters, a column-visibility toggle persisted to localStorage, green
+ * the filter bar, a column-visibility toggle persisted to localStorage, green
  * badges on `confirmed` WhatsApp cells, row-expand to an evidence panel, Export
  * CSV of the current filtered view, and bulk select → delete.
+ *
+ * **The major filter is the outreach batch** (_BATCH_SPEC.md), not the
+ * has-a-website split it replaced. The two are not alternatives at the same
+ * level: a website is one property, while a batch is the answer to "which
+ * message does this business get", and it already contains the website
+ * distinction (`delivery-site` vs `delivery-nosite`). Picking a batch is
+ * therefore picking a day's work, which is why this screen shows the batch's
+ * definition and its send note next to the picker — the operator is about to
+ * copy 51 numbers and write one message for all of them.
+ *
+ * `hasWebsite` survives as a chip rather than a control. Screen 2 deep-links
+ * into one half of a run with `?website=yes|no`, and a filter that is applied
+ * but not visible is the one thing a filter bar must never do.
  *
  * **Sorting and filtering are server-side, not TanStack's client-side models.**
  * §12.2 requires the CSV to be the filtered, sorted set the operator is looking
@@ -35,9 +48,12 @@ import {
   copyToClipboard,
   downloadCsv,
   emptyFilters,
+  EXTRACT_ALL,
   toQueryString,
-  type BatchSize,
+  type BatchCatalogue,
+  type BatchInfo,
   type ExtractionResult,
+  type ExtractLimit,
   type LeadRow,
   type ResultsResponse,
   type RunSummary,
@@ -58,6 +74,7 @@ export default function ResultsPage() {
 function ResultsScreen() {
   const searchParams = useSearchParams();
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [catalogue, setCatalogue] = useState<BatchCatalogue | null>(null);
   const [data, setData] = useState<ResultsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,6 +89,8 @@ function ResultsScreen() {
         : searchParams.get("website") === "no"
           ? false
           : null,
+    // `?batch=delivery-nosite` — a link straight into one batch's work queue.
+    batches: searchParams.get("batch")?.split(",").filter(Boolean) ?? [],
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // A drawer, not an inline expanded row: an extra row of variable height inside
@@ -91,6 +110,9 @@ function ResultsScreen() {
 
   useEffect(() => {
     api.listRuns().then(setRuns).catch((e) => setError(String(e)));
+    // Fetched, never hard-coded: a batch list typed into TypeScript would be a
+    // second definition of a controlled vocabulary the cascade owns.
+    api.batches().then(setCatalogue).catch((e) => setError(String(e)));
   }, []);
 
   const query = useMemo(() => toQueryString(filters), [filters]);
@@ -207,7 +229,25 @@ function ResultsScreen() {
    * copy therefore leaves rows marked, which is why the numbers are rendered
    * below rather than only pushed at the clipboard.
    */
-  async function extract(limit: BatchSize) {
+  async function extract(limit: ExtractLimit) {
+    if (limit === EXTRACT_ALL) {
+      // The one irreversible-feeling pull. It is undoable — clearing the ledger
+      // puts every row back — but it marks the whole view in one click, so the
+      // count and the scope get said out loud first.
+      const scope = selectedBatch
+        ? `${selectedBatch.id} · ${selectedBatch.name}`
+        : "the current filtered view";
+      if (
+        !window.confirm(
+          `Extract all ${remainingInView} un-extracted row(s) in ${scope}?\n\n` +
+            "Every one is marked extracted and skipped by later pulls. Nothing " +
+            "is deleted and nothing is suppressed — clearing them from the " +
+            "Extracted screen puts them back in the queue.",
+        )
+      ) {
+        return;
+      }
+    }
     setExtractOpen(false);
     setExtracting(true);
     setCopied(false);
@@ -256,6 +296,18 @@ function ResultsScreen() {
     () => (data?.rows ?? []).filter((r) => r._extracted).length,
     [data],
   );
+  // What "Extract all" would take. The rows on screen minus the ones already on
+  // the ledger — the same arithmetic the server does, shown before the click
+  // rather than reported after it.
+  const remainingInView = (data?.total ?? 0) - extractedInView;
+  const selectedBatch = useMemo(
+    () =>
+      catalogue?.batches.find((b) => b.slug === filters.batches[0]) ?? null,
+    [catalogue, filters.batches],
+  );
+  const unbatchedInView = catalogue
+    ? (data?.batch_counts?.[catalogue.unbatched_slug] ?? 0)
+    : 0;
 
   return (
     <>
@@ -335,26 +387,31 @@ function ResultsScreen() {
           </div>
           <div
             className="field"
-            style={{ flex: "0 0 210px" }}
-            title="Two halves of the same run, worth working separately: §5.2 can only confirm a WhatsApp number on a business that has a site, and for one that has none §6's social pass is the only route to a confirmed label there will ever be."
+            style={{ flex: "1 1 320px" }}
+            title="_BATCH_SPEC.md — the outreach cascade. Mutually exclusive: every business is in exactly one batch, so nobody is messaged twice."
           >
-            <label>Website</label>
+            <label>Outreach batch</label>
             <select
-              value={
-                filters.hasWebsite === null ? "" : filters.hasWebsite ? "yes" : "no"
-              }
-              onChange={(e) =>
-                patch({
-                  hasWebsite:
-                    e.target.value === "" ? null : e.target.value === "yes",
-                })
-              }
+              value={filters.batches[0] ?? ""}
+              onChange={(e) => patch({ batches: e.target.value ? [e.target.value] : [] })}
             >
-              <option value="">any — every business</option>
-              <option value="yes">has a website</option>
-              {/* "on record", not "has none". Nothing here proves the negative:
-                  it says no source published one. */}
-              <option value="no">no website on record</option>
+              <option value="">every batch — {data?.total ?? 0} rows</option>
+              {(catalogue?.batches ?? []).map((b) => (
+                <option key={b.slug} value={b.slug}>
+                  {b.id} · {b.name} — {data?.batch_counts?.[b.slug] ?? 0}
+                  {b.sendable ? "" : " (do not send)"}
+                </option>
+              ))}
+              {catalogue && (
+                /* Not a batch, and listed apart from them: the cascade has no
+                   definitions for this business's category. Offered as a filter
+                   because on a non-food run it is every row, and "why is every
+                   batch empty?" needs an answer that is clickable. */
+                <option value={catalogue.unbatched_slug}>
+                  no batch defined —{" "}
+                  {data?.batch_counts?.[catalogue.unbatched_slug] ?? 0}
+                </option>
+              )}
             </select>
           </div>
           <div className="field" style={{ flex: "0 0 150px" }}>
@@ -390,7 +447,36 @@ function ResultsScreen() {
             />
             One table across runs (collapse on place_id)
           </label>
+
+          {/* The website split, demoted from a control to a chip. It is still a
+              real filter — Screen 2 links into it — so it has to be visible and
+              clearable wherever it came from. */}
+          {filters.hasWebsite !== null && (
+            <span className="badge likely" style={{ alignSelf: "center" }}>
+              {filters.hasWebsite ? "has a website" : "no website on record"}
+              <button
+                className="small"
+                style={{ marginLeft: 6, padding: "0 5px" }}
+                onClick={() => patch({ hasWebsite: null })}
+                title="Clear the website filter. The batch cascade already splits on this — delivery-site vs delivery-nosite."
+              >
+                ×
+              </button>
+            </span>
+          )}
         </div>
+
+        {selectedBatch && <BatchNote batch={selectedBatch} />}
+
+        {catalogue && unbatchedInView > 0 && !filters.batches.length && (
+          /* Never silently: on a salon run every batch reads 0 and the reason is
+             a fact about the spec, not about the data. */
+          <div className="notice small" style={{ marginTop: 10 }}>
+            <b>{unbatchedInView}</b> row(s) here are in a category the cascade has
+            no definitions for, so they are in no batch. Batches are defined for{" "}
+            <b>{catalogue.categories.join(", ")}</b> only — {catalogue.note}
+          </div>
+        )}
       </div>
 
       <div className="toolbar">
@@ -477,8 +563,15 @@ function ResultsScreen() {
             <div className="column-menu" style={{ minWidth: 300 }}>
               <div className="small muted" style={{ marginBottom: 8 }}>
                 Copies every <b>confirmed</b> and <b>likely</b> number from the top
-                of <i>this filtered view</i>, one per line, and marks those
-                businesses extracted so the next pull moves past them.
+                of <i>this filtered view</i>
+                {selectedBatch && (
+                  <>
+                    {" "}
+                    — <b>{selectedBatch.id} · {selectedBatch.name}</b>
+                  </>
+                )}
+                , one per line, and marks those businesses extracted so the next
+                pull moves past them.
               </div>
               <div className="row">
                 {BATCH_SIZES.map((size) => (
@@ -486,11 +579,28 @@ function ResultsScreen() {
                     Top {size}
                   </button>
                 ))}
+                {/* Working a batch means draining it. Two rounds of top-30 and a
+                    third that returns 11 is the same pull said three times. */}
+                <button
+                  className="primary"
+                  onClick={() => extract(EXTRACT_ALL)}
+                  disabled={remainingInView <= 0}
+                  title="Every un-extracted row in this filtered view, however many"
+                >
+                  All {remainingInView} remaining
+                </button>
               </div>
               <div className="small muted" style={{ marginTop: 8 }}>
                 {extractedInView} of {data?.total ?? 0} rows here are already
                 extracted and will be skipped.
               </div>
+              {selectedBatch && !selectedBatch.sendable && (
+                <div className="notice small" style={{ marginTop: 8 }}>
+                  <b>{selectedBatch.name}</b> is not a send batch — these
+                  businesses have no WhatsApp-capable number, so a pull marks them
+                  worked and copies nothing. Route them to email or a visit.
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -523,6 +633,12 @@ function ResultsScreen() {
                   them the same query — so a business would vanish from an
                   export because somebody once copied its number. */}
               <th style={{ width: 30 }} title="On the extraction ledger" />
+              {/* Not one of §12.1's 41 columns and deliberately outside the
+                  column-visibility toggle: the batch is how this screen is now
+                  organised, and it is derived rather than exported. */}
+              <th style={{ width: 74 }} title="_BATCH_SPEC batch · send rank within it">
+                batch
+              </th>
               {visibleColumns.map((column) => (
                 <th
                   key={column.id}
@@ -585,6 +701,9 @@ function ResultsScreen() {
                       </span>
                     )}
                   </td>
+                  <td className="small">
+                    <BatchCell row={row.original} catalogue={catalogue} />
+                  </td>
                   {row.getVisibleCells().map((cell) => (
                     <td
                       key={cell.id}
@@ -601,8 +720,8 @@ function ResultsScreen() {
             {paddingBottom > 0 && <tr style={{ height: paddingBottom }} aria-hidden />}
             {data?.total === 0 && (
               <tr>
-                <td colSpan={visibleColumns.length + 3}>
-                  <EmptyState filters={filters} />
+                <td colSpan={visibleColumns.length + 4}>
+                  <EmptyState filters={filters} catalogue={catalogue} />
                 </td>
               </tr>
             )}
@@ -674,6 +793,74 @@ function PullPanel({
       <div className="log" style={{ marginTop: 8, maxHeight: 180 }}>
         {pull.numbers.join("\n") || "No confirmed or likely numbers in this batch."}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The batch this row is in, and its position within it.
+ *
+ * `unbatched` renders as a muted dash rather than as a badge: it is not a
+ * seventh batch, it is the absence of a definition covering this business's
+ * category, and giving it the same visual weight as `B01` would imply there is
+ * a message for it.
+ */
+function BatchCell({
+  row,
+  catalogue,
+}: {
+  row: LeadRow;
+  catalogue: BatchCatalogue | null;
+}) {
+  const spec = catalogue?.batches.find((b) => b.slug === row._batch);
+  if (!spec) {
+    return (
+      <span
+        className="muted"
+        title={
+          catalogue
+            ? `No batch: the cascade is defined for ${catalogue.categories.join(", ")} only.`
+            : "No batch."
+        }
+      >
+        —
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`badge ${spec.sendable ? "likely" : "throttled"}`}
+      title={`${spec.name} — ${spec.definition}${
+        row._send_rank ? ` · send rank ${row._send_rank} in this view` : ""
+      }`}
+    >
+      {spec.id}
+      {row._send_rank ? <span className="muted"> #{row._send_rank}</span> : null}
+    </span>
+  );
+}
+
+/**
+ * The selected batch, spelled out.
+ *
+ * The operator is about to copy tens of numbers and write *one* message for all
+ * of them, so the thing worth putting on screen is not the row count — it is
+ * what these businesses have in common and what the spec says not to say to
+ * them. B06's "never reference the rating" is a sentence that saves a thread.
+ */
+function BatchNote({ batch }: { batch: BatchInfo }) {
+  return (
+    <div className="notice info small" style={{ marginTop: 10 }}>
+      <b>
+        {batch.id} · {batch.name}
+      </b>
+      {batch.send_priority !== null ? (
+        <span className="muted"> · send priority {batch.send_priority}</span>
+      ) : (
+        <span className="muted"> · not a send batch</span>
+      )}
+      <div style={{ marginTop: 4 }}>{batch.definition}</div>
+      <div style={{ marginTop: 4 }}>{batch.note}</div>
     </div>
   );
 }
@@ -754,7 +941,29 @@ function EvidenceDrawer({ row, onClose }: { row: LeadRow; onClose: () => void })
  * lifts it over 60. Four such runs are in the database. Showing "no results"
  * there would read as a broken filter rather than as a missing stage.
  */
-function EmptyState({ filters }: { filters: TableFilters }) {
+function EmptyState({
+  filters,
+  catalogue,
+}: {
+  filters: TableFilters;
+  catalogue: BatchCatalogue | null;
+}) {
+  if (filters.batches.length && catalogue) {
+    // The likeliest reason a batch is empty is that this run is not food, and
+    // "no rows match" would send the operator hunting through the filter bar
+    // for a mistake they did not make.
+    return (
+      <div>
+        <b>Nothing in this batch.</b>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          The cascade is defined for <b>{catalogue.categories.join(", ")}</b> only —
+          every business in another category is in no batch at all, so on a
+          non-food run each of the seven reads 0. Pick <i>no batch defined</i> to
+          see those rows, or <i>every batch</i> to clear the filter.
+        </div>
+      </div>
+    );
+  }
   if (filters.minScore !== null && filters.minScore >= 60) {
     return (
       <div>

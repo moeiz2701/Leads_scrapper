@@ -4,6 +4,46 @@ Implementation spec for the scraper. Batches are **mutually exclusive**: every l
 
 ---
 
+## 0. Implementation status (added 2026-08-13)
+
+**Built.** The cascade is `backend/src/leadscraper/core/batches.py` (pure), applied
+in `services/results.py` so that the table, the CSV and the extraction clipboard
+all see the same batch — §12.2's one-query rule. The batch is the results
+screen's **major filter**, replacing the has-a-website split it contains.
+
+**Verified against live data.** `scripts/spike_batches.py` re-runs the split over
+every run in the database. On Lahore × food it reproduces §4's table exactly:
+51 / 78 / 22 / 36 / 30 / 91 / 120, **308 sendable of 428**. The partition is
+asserted exhaustive rather than eyeballed (`test_the_batches_partition_the_run_exhaustively`).
+
+**Scope: `food` only.** Every threshold here was calibrated on one Lahore × food
+scrape, and the two heaviest branches are food-shaped — `DINE_IN_SUBCATEGORIES`
+is a list of restaurant subcategories, and the delivery split exists because of a
+Foodpanda commission. Businesses in the other six §4 verticals resolve to
+`unbatched`, which is **not a batch**: no message, no send priority, never a send
+target. Measured today, the six salon runs in the database are 100% `unbatched`
+(410 rows); routing them through this cascade instead would have put all 410 in
+`delivery-*` and pitched delivery commission at hair salons. Defining another
+vertical is the §8 exercise — measure that category's review-count percentiles
+and its own equivalent of the dine-in list — not a matter of widening the
+category list.
+
+**Three departures from the prose below**, each pinned by a test in
+`backend/tests/test_batches.py`:
+
+| § | Spec says | Built as | Why |
+|---|---|---|---|
+| §2 | scan `phone_1`…`phone_4` | scan every ranked phone | §12.1's 4 slots are a column cap; §10.1 forbids it becoming a data cap. A business whose 5th number is WhatsApp-capable would be `B00` while the clipboard still handed that number out. |
+| §2 | `wa_confidence` from the pick score | §9.3's label (`confirmed`/`likely`) | The 1–4 score only ranks two qualifying numbers against each other. Exporting it beside a phone number invites reading it as a confidence percentage. |
+| §2 | `clean_num` repairs Excel escaping | kept as a guard | Its input was a CSV cell (`="+923005326559"`); ours is `contacts.value_e164`, already E.164 from §9.1. It still rejects anything under 10 characters. |
+
+`send_rank` (§6) is computed per batch over the *current view* and shown in the
+table; it does not reorder anything, because the pull is the table. §7's
+per-batch CSV files are **not** built — the CSV is §12.1's 41 columns, filtered
+to one batch.
+
+---
+
 ## 1. Constants
 
 ```python

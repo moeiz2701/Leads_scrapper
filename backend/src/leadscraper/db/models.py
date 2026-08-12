@@ -158,6 +158,7 @@ class Extraction(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_extractions_run_id", "run_id"),
         Index("ix_extractions_batch_id", "batch_id"),
+        Index("ix_extractions_batch", "batch"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -177,7 +178,17 @@ class Extraction(Base, TimestampMixin):
     )
     # One Extract click. Lets the list group a pull the operator remembers making.
     batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The requested size, or NULL for an "extract all" pull — "top 100" and
+    # "everything that was left in this view" are different facts about how the
+    # row was chosen.
     batch_size: Mapped[int | None] = mapped_column(Integer)
+    # _BATCH_SPEC's outreach batch as it stood at pull time — which message this
+    # business got. Recorded rather than derived on read for the same reason
+    # ``numbers`` is: a business that gains a website moves batch, and the
+    # history of what was already sent must not move with it. NULL on rows
+    # written before this column existed, and left NULL — see
+    # ``services/extraction.list_extractions``.
+    batch: Mapped[str | None] = mapped_column(Text)
     numbers: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     extracted_at: Mapped[datetime | None] = mapped_column()
 

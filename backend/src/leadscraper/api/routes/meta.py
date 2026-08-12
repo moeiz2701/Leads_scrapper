@@ -8,13 +8,16 @@ a second copy of it in TypeScript would be the fastest way to lose that.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import APIRouter
 from sqlalchemy import func, select
 
 from leadscraper.api.deps import SessionDep
 from leadscraper.api.routes.suppression import suppressed_contact_count
-from leadscraper.api.schemas import EstimateRequest
+from leadscraper.api.schemas import BatchCatalogue, BatchInfo, EstimateRequest
 from leadscraper.config import get_settings
+from leadscraper.core import batches
 from leadscraper.core.proxy import proxy_available
 from leadscraper.db.models import DoNotContact
 from leadscraper.enums import Category, NumberPreference, Stage
@@ -69,6 +72,32 @@ def categories() -> list[dict]:
             }
         )
     return out
+
+
+@router.get("/batches", response_model=BatchCatalogue)
+def batch_catalogue() -> BatchCatalogue:
+    """_BATCH_SPEC.md §4's batches, in send-priority order.
+
+    Served rather than typed into the frontend for §4.2's reason: a second copy
+    of a controlled vocabulary is the fastest way to have the UI offer a filter
+    the backend rejects. The response also carries what the cascade *does not*
+    cover — ``categories`` is ``["food"]`` — because a picker showing seven
+    batches with nothing in them looks broken, and the reason it is empty on a
+    salon run is a fact about the spec rather than about the data.
+    """
+    return BatchCatalogue(
+        batches=[BatchInfo(**asdict(batch)) for batch in batches.BATCHES],
+        unbatched_slug=batches.UNBATCHED,
+        categories=sorted(batches.BATCHED_CATEGORIES),
+        note=(
+            "Thresholds (200 reviews, rating 4.0) and the dine-in list are "
+            "calibrated on one Lahore × food scrape. Businesses in every other "
+            "category resolve to `unbatched`: the cascade has no definitions for "
+            "them yet, and routing them by food's rules would pitch delivery "
+            "commission at a salon. Defining another vertical means measuring "
+            "its review-count percentiles, per §8 of the spec."
+        ),
+    )
 
 
 @router.get("/number-preferences")

@@ -12,9 +12,10 @@ import uuid
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from leadscraper.core import batches
 from leadscraper.db.session import get_session
 from leadscraper.services.results import DEFAULT_SORT, SORTABLE, ResultQuery
 
@@ -41,6 +42,28 @@ def _split(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def parse_batches(value: str | None) -> tuple[str, ...]:
+    """_BATCH_SPEC's slugs, validated rather than silently dropped.
+
+    Every other filter here fails open — an unknown ``sort`` column falls back to
+    the default table. This one fails loud, because failing open would *widen*
+    the view: a mistyped batch that quietly matched nothing would be filtered out
+    to zero rows, and one that quietly matched everything would present the whole
+    run as one batch and get it extracted under a single message.
+    """
+    tokens = [(token, batches.resolve_token(token)) for token in _split(value)]
+    unknown = [token for token, resolved in tokens if resolved is None]
+    if unknown:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown batch(es): {', '.join(unknown)}. "
+            f"Expected one of {', '.join(batches.FILTER_TOKENS)}.",
+        )
+    # Normalised to slugs so `B01` and `delivery-nosite` are one cache key, one
+    # log line and one thing to test.
+    return tuple(dict.fromkeys(resolved for _, resolved in tokens if resolved))
+
+
 def result_query(
     # Named `run`, not `run_id`: this dependency is also mounted on
     # `/runs/{run_id}/export.csv`, and FastAPI resolves a dependency parameter
@@ -51,6 +74,15 @@ def result_query(
     has_website: Annotated[
         bool | None,
         Query(description="true = a website is on record, false = none is, omitted = any"),
+    ] = None,
+    batch: Annotated[
+        str | None,
+        Query(
+            description=(
+                "_BATCH_SPEC slugs, B0N ids, or `unbatched` (a category the "
+                "cascade has no definitions for). Comma-separated; omitted = all"
+            )
+        ),
     ] = None,
     min_score: Annotated[int | None, Query(ge=0, le=100)] = None,
     line_type: Annotated[str | None, Query(description="mobile,landline,uan")] = None,
@@ -67,6 +99,7 @@ def result_query(
         whatsapp=_split(whatsapp),
         has_owner_name=has_owner_name,
         has_website=has_website,
+        batches=parse_batches(batch),
         min_score=min_score,
         line_types=_split(line_type),
         sources=_split(source),

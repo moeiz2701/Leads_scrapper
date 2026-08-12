@@ -15,6 +15,13 @@ export type LeadRow = Record<string, unknown> & {
   _run_id: string;
   /** On the extraction ledger. A decoration — never a filter (see services/results.py). */
   _extracted: boolean;
+  /** _BATCH_SPEC slug, or `unbatched` for a category the cascade does not cover. */
+  _batch: string;
+  /** §2's derived number — the one this business would be messaged on. */
+  _wa_number: string | null;
+  _wa_confidence: string | null;
+  /** §6 — position within its batch by review_count desc, in *this* view. */
+  _send_rank: number | null;
 };
 
 export interface ResultsResponse {
@@ -28,6 +35,34 @@ export interface ResultsResponse {
   collapsed: number;
   cities: string[];
   categories: string[];
+  /** Slug → size across the whole view, *before* the batch filter narrowed it. */
+  batch_counts: Record<string, number>;
+}
+
+/** One outreach batch of _BATCH_SPEC.md §4. */
+export interface BatchInfo {
+  id: string;
+  slug: string;
+  name: string;
+  definition: string;
+  send_priority: number | null;
+  sendable: boolean;
+  note: string;
+}
+
+/**
+ * The batch vocabulary, fetched rather than hard-coded.
+ *
+ * `categories` is the honest limit of the layer: the cascade's thresholds and
+ * its dine-in list were calibrated on one Lahore × food scrape, so it covers
+ * `food` and nothing else. Every other category's rows carry `unbatched_slug`,
+ * and the UI has to say why rather than showing seven empty batches.
+ */
+export interface BatchCatalogue {
+  batches: BatchInfo[];
+  unbatched_slug: string;
+  categories: string[];
+  note: string;
 }
 
 export interface RunSummary {
@@ -136,6 +171,16 @@ export interface RunEstimate {
 export const BATCH_SIZES = [30, 50, 100] as const;
 export type BatchSize = (typeof BATCH_SIZES)[number];
 
+/**
+ * Drain the filtered view — every un-extracted row in it, however many.
+ *
+ * Spelled out rather than expressed as an absent limit, matching the backend:
+ * "no limit" arrived at by omission is one dropped field between pulling a batch
+ * and emptying the queue.
+ */
+export const EXTRACT_ALL = "all" as const;
+export type ExtractLimit = BatchSize | typeof EXTRACT_ALL;
+
 export interface ExtractedBusiness {
   business_id: string;
   run_id: string;
@@ -144,6 +189,7 @@ export interface ExtractedBusiness {
   lead_score: number | null;
   website: string | null;
   numbers: string[];
+  batch: string | null;
 }
 
 /**
@@ -157,7 +203,8 @@ export interface ExtractionResult {
   clipboard: string;
   numbers: string[];
   businesses: ExtractedBusiness[];
-  requested: number;
+  /** `null` = the pull was asked to drain the view rather than take a count. */
+  requested: number | null;
   marked: number;
   skipped_already_extracted: number;
   without_numbers: number;
@@ -170,7 +217,12 @@ export interface ExtractionEntry {
   business_id: string;
   run_id: string;
   batch_id: string;
+  /** `null` = an "extract all" pull rather than a fixed top-N. */
   batch_size: number | null;
+  /** Recorded at pull time. `null` on rows pulled before the column existed. */
+  batch: string | null;
+  /** The cascade against the business as it stands now — may differ from `batch`. */
+  current_batch: string | null;
   /** As sent, not as the business stands now — see services/extraction.py. */
   numbers: string[];
   extracted_at: string | null;
@@ -226,6 +278,7 @@ export const api = {
 
   cities: () => request<City[]>("/api/meta/cities"),
   categories: () => request<CategoryInfo[]>("/api/meta/categories"),
+  batches: () => request<BatchCatalogue>("/api/meta/batches"),
   preferences: () => request<PreferenceInfo[]>("/api/meta/number-preferences"),
   stages: () =>
     request<{ implemented: string[]; missing: { stage: string; phase: string }[] }>(
@@ -278,22 +331,38 @@ export const api = {
    * whatever filter is applied" is guaranteed by construction. Only the batch
    * size travels in the body.
    */
-  extract: (query: string, limit: BatchSize) =>
+  extract: (query: string, limit: ExtractLimit) =>
     request<ExtractionResult>(`/api/extractions?${query}`, {
       method: "POST",
       body: JSON.stringify({ limit }),
     }),
 
-  extractions: (runIds: string[] = []) => {
+  extractions: (runIds: string[] = [], batches: string[] = []) => {
     const params = new URLSearchParams();
     runIds.forEach((id) => params.append("run", id));
+    if (batches.length) params.set("batch", batches.join(","));
     return request<ExtractionEntry[]>(`/api/extractions?${params.toString()}`);
+  },
+  /** Ledger size per batch — deliberately *not* scoped to the batch filter. */
+  extractionCounts: (runIds: string[] = []) => {
+    const params = new URLSearchParams();
+    runIds.forEach((id) => params.append("run", id));
+    return request<Record<string, number>>(
+      `/api/extractions/counts?${params.toString()}`,
+    );
   },
   clearExtraction: (id: string) =>
     request<void>(`/api/extractions/${id}`, { method: "DELETE" }),
-  clearExtractions: (runIds: string[] = []) => {
+  /**
+   * Clear the ledger — scoped to the same run *and batch* the list is showing.
+   *
+   * The batch scope is not optional politeness: a clear that ignored the filter
+   * would delete a run's whole ledger from a screen displaying 22 rows of it.
+   */
+  clearExtractions: (runIds: string[] = [], batches: string[] = []) => {
     const params = new URLSearchParams();
     runIds.forEach((id) => params.append("run", id));
+    if (batches.length) params.set("batch", batches.join(","));
     return request<{ cleared: number }>(`/api/extractions?${params.toString()}`, {
       method: "DELETE",
     });
@@ -331,8 +400,18 @@ export interface TableFilters {
   runIds: string[];
   whatsapp: string[];
   hasOwnerName: boolean | null;
-  /** Three states: `null` any, `true` a site is on record, `false` none is. */
+  /**
+   * Three states: `null` any, `true` a site is on record, `false` none is.
+   *
+   * No longer the table's major split — the batch cascade is, and it carries the
+   * website distinction inside it (`delivery-site` vs `delivery-nosite`). Kept
+   * because Screen 2 deep-links into one half of a run with `?website=yes|no`,
+   * and because it is the only control that means "sited, whatever the vertical"
+   * on the six categories the cascade does not cover. Shown as a chip when set.
+   */
   hasWebsite: boolean | null;
+  /** _BATCH_SPEC slugs, or `unbatched`. Empty = every batch. */
+  batches: string[];
   minScore: number | null;
   lineTypes: string[];
   sources: string[];
@@ -347,6 +426,7 @@ export const emptyFilters: TableFilters = {
   whatsapp: [],
   hasOwnerName: null,
   hasWebsite: null,
+  batches: [],
   minScore: null,
   lineTypes: [],
   sources: [],
@@ -363,6 +443,7 @@ export function toQueryString(filters: TableFilters): string {
   if (filters.hasOwnerName !== null)
     params.set("has_owner_name", String(filters.hasOwnerName));
   if (filters.hasWebsite !== null) params.set("has_website", String(filters.hasWebsite));
+  if (filters.batches.length) params.set("batch", filters.batches.join(","));
   if (filters.minScore !== null) params.set("min_score", String(filters.minScore));
   if (filters.lineTypes.length) params.set("line_type", filters.lineTypes.join(","));
   if (filters.sources.length) params.set("source", filters.sources.join(","));

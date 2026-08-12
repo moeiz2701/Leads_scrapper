@@ -41,6 +41,7 @@ def get_results(session: SessionDep, query: QueryDep) -> ResultsResponse:
         collapsed=page.collapsed,
         cities=list(page.cities),
         categories=list(page.categories),
+        batch_counts=page.batch_counts,
     )
 
 

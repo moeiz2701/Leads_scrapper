@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from leadscraper.core import batches
 from leadscraper.db.models import Business, Contact, DoNotContact, Extraction, Run
 from leadscraper.enums import (
     ContactKind,
@@ -30,7 +31,9 @@ from leadscraper.enums import (
 )
 from leadscraper.services.extraction import (
     BATCH_SIZES,
+    EXTRACT_ALL,
     UnsupportedBatchSize,
+    batch_counts,
     clear_extraction,
     clear_extractions,
     extract,
@@ -345,6 +348,233 @@ def test_an_unsupported_batch_size_is_refused_rather_than_clamped(db_session: Se
         extract(db_session, ResultQuery(run_ids=(run.id,)), 31)
 
     assert db_session.execute(select(Extraction)).scalars().all() == []
+
+
+# --------------------------------------------------------------------------- #
+# Extract all
+# --------------------------------------------------------------------------- #
+
+
+@requires_db
+def test_extract_all_drains_the_filtered_view(db_session: Session):
+    """Working a batch means finishing it.
+
+    Two rounds of top-30 and a third that returns 11 is one pull said three
+    times, and each round is a chance to lose count of which rows are left.
+    """
+    run = _run(db_session)
+    for i in range(35):
+        _lead(db_session, run, f"Salon {i:02d}", 90)
+
+    result = extract(db_session, ResultQuery(run_ids=(run.id,)), EXTRACT_ALL)
+
+    assert result.marked == 35
+    assert result.remaining == 0
+    # `requested` is None rather than 35: "everything that was left" is a
+    # different fact from "top 35", and recording the realised count as the
+    # request would turn the first into the second.
+    assert result.requested is None
+    assert result.warnings == []
+
+
+@requires_db
+def test_extract_all_is_still_only_what_is_filtered(db_session: Session):
+    """"All" is a size, not a scope. It never reaches past the current view.
+
+    This is what makes it safe to point at one batch: the button drains
+    `delivery-nosite` and leaves the other six untouched.
+    """
+    run = _run(db_session)
+    _lead(db_session, run, "Sited", 90, website="https://sited.pk")
+    _lead(db_session, run, "Siteless", 95, website=None)
+
+    result = extract(
+        db_session, ResultQuery(run_ids=(run.id,), has_website=True), EXTRACT_ALL
+    )
+
+    assert [b.name for b in result.businesses] == ["Sited"]
+    assert len(db_session.execute(select(Extraction)).scalars().all()) == 1
+
+
+@requires_db
+def test_extract_all_on_an_exhausted_view_says_so(db_session: Session):
+    """A pull that marks nothing must explain itself rather than returning an
+    empty clipboard and letting the operator wonder."""
+    run = _run(db_session)
+    _lead(db_session, run, "A", 90)
+    query = ResultQuery(run_ids=(run.id,))
+
+    extract(db_session, query, EXTRACT_ALL)
+    second = extract(db_session, query, EXTRACT_ALL)
+
+    assert second.marked == 0
+    assert any("no more un-extracted rows" in w for w in second.warnings)
+
+
+@requires_db
+def test_an_all_pull_records_no_batch_size(db_session: Session):
+    """NULL ``batch_size`` is "everything that was left", not a missing value."""
+    run = _run(db_session)
+    _lead(db_session, run, "A", 90)
+
+    extract(db_session, ResultQuery(run_ids=(run.id,)), EXTRACT_ALL)
+
+    entry = db_session.execute(select(Extraction)).scalars().one()
+    assert entry.batch_size is None
+
+
+# --------------------------------------------------------------------------- #
+# The outreach batch on the ledger (_BATCH_SPEC.md)
+# --------------------------------------------------------------------------- #
+
+
+def _food(session: Session, run: Run, name: str, **overrides) -> Business:
+    base = dict(category="food", subcategory="Restaurant", review_count=800, rating=4.5)
+    business = _business(
+        session, run, name=name, name_norm=name.lower(), **{**base, **overrides}
+    )
+    _phone(session, business)
+    return business
+
+
+@requires_db
+def test_a_pull_can_be_scoped_to_one_batch(db_session: Session):
+    """"Give me the next 30 Commission Escape leads" — the operator's actual loop.
+
+    The batch is a filter like any other, so it reaches the pull through the same
+    query the table used. Nothing in the extraction path knows what a batch is
+    beyond recording which one it was.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "No Site")
+    _food(db_session, run, "Sited", website="https://sited.pk")
+
+    result = extract(
+        db_session,
+        ResultQuery(run_ids=(run.id,), batches=(batches.DELIVERY_NOSITE,)),
+        EXTRACT_ALL,
+    )
+
+    assert [b.name for b in result.businesses] == ["No Site"]
+    assert [b.batch for b in result.businesses] == [batches.DELIVERY_NOSITE]
+
+
+@requires_db
+def test_the_ledger_records_the_batch_as_it_was_when_the_message_went_out(
+    db_session: Session,
+):
+    """The batch is history, like the numbers beside it.
+
+    This business had no website when it was messaged the `delivery-nosite`
+    pitch — an argument about Foodpanda commission aimed at a business with no
+    web presence. A later run finds its site and the cascade moves it to
+    `delivery-site`, whose pitch is an addition to a site it now has. Rewriting
+    the ledger would erase which of the two was actually sent, and the follow-up
+    would contradict the first message.
+    """
+    run = _run(db_session, category="food")
+    business = _food(db_session, run, "Karahi House")
+
+    extract(db_session, ResultQuery(run_ids=(run.id,)), SMALLEST)
+
+    business.website = "https://karahi.pk"
+    db_session.flush()
+
+    entry = list_extractions(db_session, (run.id,))[0]
+    assert entry["batch"] == batches.DELIVERY_NOSITE
+    # ...and the move is visible rather than silent.
+    assert entry["current_batch"] == batches.DELIVERY_SITE
+
+
+@requires_db
+def test_the_ledger_can_be_filtered_to_one_batch(db_session: Session):
+    """"What did I already send the Café First Presence message to?"
+
+    The question that decides what today's pull can say, and it has to be
+    answerable per run and per batch.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Cafe One", subcategory="Cafe")
+    _food(db_session, run, "Delivery One")
+
+    extract(db_session, ResultQuery(run_ids=(run.id,)), EXTRACT_ALL)
+
+    cafes = list_extractions(
+        db_session, (run.id,), batch_tokens=(batches.CAFE_NOSITE,)
+    )
+    assert [e["business_name"] for e in cafes] == ["Cafe One"]
+    # The same tokens the results filter takes, spelled either way.
+    assert len(list_extractions(db_session, (run.id,), batch_tokens=("B03",))) == 1
+    assert batch_counts(db_session, (run.id,))[batches.CAFE_NOSITE] == 1
+
+
+@requires_db
+def test_a_row_pulled_before_the_column_existed_falls_back_to_its_current_batch(
+    db_session: Session,
+):
+    """``None`` and ``unbatched`` are different answers and are stored apart.
+
+    A NULL ``batch`` means "we did not record one" — the row predates the column.
+    Backfilling it would assert a fact about a past pull from present data, so
+    the read falls back to the current batch and the UI marks it as derived. The
+    alternative is a screen that is empty for every pull made before this
+    feature landed.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Old Pull")
+    extract(db_session, ResultQuery(run_ids=(run.id,)), SMALLEST)
+
+    entry = db_session.execute(select(Extraction)).scalars().one()
+    entry.batch = None  # as the ledger looked before the migration
+    db_session.flush()
+
+    row = list_extractions(db_session, (run.id,))[0]
+    assert row["batch"] is None
+    assert row["current_batch"] == batches.DELIVERY_NOSITE
+    # ...and it is still findable under the batch it is in today.
+    assert (
+        len(list_extractions(db_session, (run.id,), batch_tokens=(batches.DELIVERY_NOSITE,)))
+        == 1
+    )
+
+
+@requires_db
+def test_a_non_food_pull_is_recorded_as_unbatched(db_session: Session):
+    """Not NULL: "the cascade has no definition covering this business" is a
+    fact we do know, and it is not the same as "we did not record one"."""
+    run = _run(db_session, city="Lahore", category="salon")
+    _lead(db_session, run, "Glow Studio", 90, category="salon")
+
+    extract(db_session, ResultQuery(run_ids=(run.id,)), SMALLEST)
+
+    entry = db_session.execute(select(Extraction)).scalars().one()
+    assert entry.batch == batches.UNBATCHED
+
+
+@requires_db
+def test_clearing_is_scoped_to_the_batch_the_screen_was_showing(db_session: Session):
+    """A clear must retract exactly what was listed.
+
+    Ignoring the batch filter would delete a run's whole ledger from a screen
+    displaying one batch of it — and the operator would find out by re-extracting
+    businesses they had already messaged.
+    """
+    run = _run(db_session, category="food")
+    _food(db_session, run, "Cafe One", subcategory="Cafe")
+    _food(db_session, run, "Delivery One")
+    _food(db_session, run, "Delivery Two", website="https://two.pk")
+
+    extract(db_session, ResultQuery(run_ids=(run.id,)), EXTRACT_ALL)
+
+    cleared = clear_extractions(
+        db_session, (run.id,), batch_tokens=(batches.CAFE_NOSITE,)
+    )
+
+    assert cleared == 1
+    assert sorted(e["business_name"] for e in list_extractions(db_session)) == [
+        "Delivery One",
+        "Delivery Two",
+    ]
 
 
 # --------------------------------------------------------------------------- #
