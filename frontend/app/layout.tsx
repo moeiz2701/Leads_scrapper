@@ -16,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Link href="/">New run</Link>
           <Link href="/runs">Runs</Link>
           <Link href="/results">Results</Link>
+          <Link href="/extracted">Extracted</Link>
           <span className="spacer" />
           <Link href="/settings">Settings</Link>
         </nav>

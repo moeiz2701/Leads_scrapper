@@ -1122,6 +1122,8 @@ CREATE INDEX ON contacts (value_e164);
 CREATE INDEX ON businesses (run_id, lead_score DESC);
 ```
 
+**Tables this SQL does not list but the build added.** `do_not_contact` (§15 requires it in v1 and warns that retrofitting it is painful) and `source_state` (§7's circuit breaker, surfaced as Screen 2's pills) have been present since Phase 1. `extractions` was added in Aug 2026 for §13 Screen 3's Extract control — one row per business handed out, `UNIQUE(business_id)`, cascading from both `businesses` and `runs`, holding the numbers **as sent** rather than as they now stand. It is a working queue, not a compliance record; `do_not_contact` remains the only table that makes a removal stick.
+
 ---
 
 ## 12. Output table and CSV export
@@ -1288,6 +1290,28 @@ Per-stage counters (discovered / enriched / attributed / deduped / qualified), a
 - Row expand → evidence panel with source URLs
 - **Export CSV** button, top right, exports the current filtered view
 - Bulk select → delete (for honouring removal requests)
+
+**Added, Aug 2026 — the website split and the extraction queue.** Two controls this section did not ask for, both driven by how the table is actually worked rather than by the spec:
+
+- **Website filter — `any` / `has a website` / `no website on record`.** Not cosmetic: the two halves are different work. A business with a site is one §5.2 can raise to `confirmed`; a business without one is a business where §6's social pass is the only route to a `confirmed` label that will ever exist, and §6.8 measured 97 businesses across the seven runs holding a social URL and no website at all. The filter is exhaustive by construction — a blank `website` counts as *no website*, because the column is gap-filled from §5.1's payload and §6.4's bio link and a surviving empty string is the absence of a site. The label says *on record* rather than *has none*: nothing here proves the negative, which is §10.2's "missing is not zero" stated for a filter.
+
+- **Extract → top 30 / 50 / 100.** Copies every `confirmed` and `likely` number off the top of *the currently filtered, currently sorted view*, one per line, and writes those businesses to an extraction ledger so the next pull moves past them. The operator's loop is not "export 429 rows" — it is "give me the next 30 worth messaging, and not the same 30 tomorrow", and nothing in §12 expresses that.
+
+  Five rules, each of which is an existing rule of this document applied one output further along:
+
+  - **The pull is the table.** It reads the same `ResultQuery` through the same `fetch_results` as the screen and §12.2's CSV. §12.2 makes a CSV that disagrees with the table a defect by definition; a clipboard that disagreed would be the same defect wearing a different button.
+  - **`confirmed` and `likely` only, from the label.** §9.3's raw evidence score stays internal, and `no` is the one label the public record argues *against*. Nothing in this path reaches the network — §9.3's standing rule about never probing WhatsApp is unaffected.
+  - **Every qualifying number, not §12.1's four.** The 4-slot cap is a property of a *column set*; §10.1 forbids it becoming a property of the data.
+  - **A row with no qualifying number still counts and is still marked.** The batch size counts businesses *worked*, not numbers found. A row looked at and found wanting would otherwise be re-offered on every pull for ever. The count comes back as `without_numbers` and the screen states it, because a clipboard shorter than the batch has to be explained rather than inferred.
+  - **Marking is not §15.** `do_not_contact` says "never contact this"; the ledger says "already sent". Clearing an entry — one, a run's worth, or all — puts the business back in the queue and deletes nothing else. The two lists are never read or written from each other's code.
+
+  The mark is a decoration on the row, never a filter: hiding extracted rows would shrink the CSV with them, and a business would vanish from an export because somebody once copied its number. §11 gains an `extractions` table for it (migration `c7f1a4be2d19`), storing the numbers **as sent** rather than as they now stand — a later run raising a contact's §9.3 evidence must not rewrite the record of a message already gone out.
+
+**Measured on all seven live runs, Aug 2026.** The split is exhaustive on every one of them (`has_website` true + false = the unfiltered total, asserted rather than eyeballed), and website coverage varies enough to matter before you filter on it: **34% on Islamabad × salon against 56% on Lahore × food**. Two findings justify the rules above rather than merely illustrating them.
+
+**Yield decays down the table, sharply, which is why a barren row is still marked.** The first 30 of Lahore × salon are 30 businesses carrying 30 numbers and **0 without**; the *second* 30 are 17 numbers and **13 without**. Karachi × salon is starker — its second pull marked 9 businesses and produced **no numbers at all**. That is §3.3's ranking working as specified, and it is the whole argument for the ledger: without it, every pull after the first re-serves the same dead tail, and the operator has no way to tell that they have already seen it.
+
+**The split corroborates §5.2 being the confirmation engine, from the read side.** Filtering Lahore × food to `whatsapp=confirmed` returns 20 rows, **19 of which have a website and 1 of which does not** — the same claim §5.2 makes from the write side, arrived at by a different route.
 
 **Note — built, Aug 2026 (Phase 5).** Next.js 16 + TanStack Table + `@tanstack/react-virtual`, per §2's stack. Everything above is implemented; four things are worth recording.
 

@@ -19,6 +19,7 @@
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   flexRender,
@@ -30,9 +31,13 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   api,
+  BATCH_SIZES,
+  copyToClipboard,
   downloadCsv,
   emptyFilters,
   toQueryString,
+  type BatchSize,
+  type ExtractionResult,
   type LeadRow,
   type ResultsResponse,
   type RunSummary,
@@ -59,6 +64,14 @@ function ResultsScreen() {
   const [filters, setFilters] = useState<TableFilters>({
     ...emptyFilters,
     runIds: searchParams.getAll("run"),
+    // `?website=yes|no` — how Screen 2 deep-links into one half of a run.
+    // Anything else, including its absence, is "any".
+    hasWebsite:
+      searchParams.get("website") === "yes"
+        ? true
+        : searchParams.get("website") === "no"
+          ? false
+          : null,
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // A drawer, not an inline expanded row: an extra row of variable height inside
@@ -68,6 +81,13 @@ function ResultsScreen() {
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [extractOpen, setExtractOpen] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  // Kept on screen after the copy. A clipboard the browser refused is
+  // indistinguishable from one it accepted until you paste, and the businesses
+  // are already marked by then — so the numbers stay visible and re-copyable.
+  const [pull, setPull] = useState<ExtractionResult | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     api.listRuns().then(setRuns).catch((e) => setError(String(e)));
@@ -176,6 +196,34 @@ function ResultsScreen() {
     }
   }
 
+  /**
+   * Extract → top N.
+   *
+   * `query` is the same string the table and the Export button send, so the
+   * pull is whatever is filtered on screen — the backend reads it through the
+   * one filter dependency and there is no second filter set here to drift.
+   *
+   * The order matters: the server marks and returns, then we copy. A failed
+   * copy therefore leaves rows marked, which is why the numbers are rendered
+   * below rather than only pushed at the clipboard.
+   */
+  async function extract(limit: BatchSize) {
+    setExtractOpen(false);
+    setExtracting(true);
+    setCopied(false);
+    try {
+      const result = await api.extract(query, limit);
+      setPull(result);
+      setCopied(await copyToClipboard(result.clipboard));
+      setNotice(null);
+      load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   async function bulkDelete() {
     const ids = [...selected];
     const confirmed = window.confirm(
@@ -204,6 +252,10 @@ function ResultsScreen() {
   }
 
   const visibleColumns = table.getVisibleLeafColumns();
+  const extractedInView = useMemo(
+    () => (data?.rows ?? []).filter((r) => r._extracted).length,
+    [data],
+  );
 
   return (
     <>
@@ -281,6 +333,30 @@ function ResultsScreen() {
               <option value="uan">uan</option>
             </select>
           </div>
+          <div
+            className="field"
+            style={{ flex: "0 0 210px" }}
+            title="Two halves of the same run, worth working separately: §5.2 can only confirm a WhatsApp number on a business that has a site, and for one that has none §6's social pass is the only route to a confirmed label there will ever be."
+          >
+            <label>Website</label>
+            <select
+              value={
+                filters.hasWebsite === null ? "" : filters.hasWebsite ? "yes" : "no"
+              }
+              onChange={(e) =>
+                patch({
+                  hasWebsite:
+                    e.target.value === "" ? null : e.target.value === "yes",
+                })
+              }
+            >
+              <option value="">any — every business</option>
+              <option value="yes">has a website</option>
+              {/* "on record", not "has none". Nothing here proves the negative:
+                  it says no source published one. */}
+              <option value="no">no website on record</option>
+            </select>
+          </div>
           <div className="field" style={{ flex: "0 0 150px" }}>
             <label>Source</label>
             <select
@@ -330,6 +406,11 @@ function ResultsScreen() {
             §15 hidden: {data.suppressed_businesses} business(es),{" "}
             {data.suppressed_contacts} contact(s)
           </span>
+        )}
+        {extractedInView > 0 && (
+          /* Shown here as well as in the Extract menu: these rows are still in
+             the table and still in the CSV — they are marked, not hidden. */
+          <span className="badge done">{extractedInView} already extracted</span>
         )}
 
         <span className="spacer" />
@@ -383,10 +464,53 @@ function ResultsScreen() {
           )}
         </div>
 
+        <div className="column-toggle">
+          <button
+            className="primary"
+            onClick={() => setExtractOpen((v) => !v)}
+            disabled={!data?.total || extracting}
+            title="Copy the WhatsApp-worthy numbers off the top of this filtered view, and mark those businesses extracted"
+          >
+            {extracting ? "Extracting…" : "Extract ▾"}
+          </button>
+          {extractOpen && (
+            <div className="column-menu" style={{ minWidth: 300 }}>
+              <div className="small muted" style={{ marginBottom: 8 }}>
+                Copies every <b>confirmed</b> and <b>likely</b> number from the top
+                of <i>this filtered view</i>, one per line, and marks those
+                businesses extracted so the next pull moves past them.
+              </div>
+              <div className="row">
+                {BATCH_SIZES.map((size) => (
+                  <button key={size} onClick={() => extract(size)}>
+                    Top {size}
+                  </button>
+                ))}
+              </div>
+              <div className="small muted" style={{ marginTop: 8 }}>
+                {extractedInView} of {data?.total ?? 0} rows here are already
+                extracted and will be skipped.
+              </div>
+            </div>
+          )}
+        </div>
+
         <button className="primary" onClick={exportCsv} disabled={!data?.total}>
           Export CSV
         </button>
       </div>
+
+      {/* Keyed on the batch so a second pull remounts the panel — otherwise its
+          "Copied ✓" state would carry over from the previous one and claim a
+          copy that has not happened yet. */}
+      {pull && (
+        <PullPanel
+          key={pull.batch_id ?? "pull"}
+          pull={pull}
+          copied={copied}
+          onClose={() => setPull(null)}
+        />
+      )}
 
       <div className="table-wrap" ref={scrollRef}>
         <table>
@@ -394,6 +518,11 @@ function ResultsScreen() {
             <tr>
               <th style={{ width: 30 }} />
               <th style={{ width: 26 }} />
+              {/* The extraction mark decorates the row; it never filters it.
+                  Hiding extracted rows would shrink the CSV too — §12.2 makes
+                  them the same query — so a business would vanish from an
+                  export because somebody once copied its number. */}
+              <th style={{ width: 30 }} title="On the extraction ledger" />
               {visibleColumns.map((column) => (
                 <th
                   key={column.id}
@@ -446,6 +575,16 @@ function ResultsScreen() {
                       +
                     </button>
                   </td>
+                  <td style={{ textAlign: "center" }}>
+                    {row.original._extracted && (
+                      <span
+                        className="badge done"
+                        title="Already extracted — the next pull skips it. Clear it from the Extracted screen to make it eligible again."
+                      >
+                        ✓
+                      </span>
+                    )}
+                  </td>
                   {row.getVisibleCells().map((cell) => (
                     <td
                       key={cell.id}
@@ -462,7 +601,7 @@ function ResultsScreen() {
             {paddingBottom > 0 && <tr style={{ height: paddingBottom }} aria-hidden />}
             {data?.total === 0 && (
               <tr>
-                <td colSpan={visibleColumns.length + 2}>
+                <td colSpan={visibleColumns.length + 3}>
                   <EmptyState filters={filters} />
                 </td>
               </tr>
@@ -475,6 +614,67 @@ function ResultsScreen() {
         <EvidenceDrawer row={expanded} onClose={() => setExpanded(null)} />
       )}
     </>
+  );
+}
+
+/**
+ * What the Extract click produced.
+ *
+ * The numbers are shown, not just copied. Three reasons, all of them the same
+ * reason: the businesses are marked *before* the clipboard write can fail, a
+ * browser can refuse `navigator.clipboard` after an `await`, and a clipboard is
+ * invisible until you paste. A pull the operator cannot see is a pull they have
+ * to redo — except the rows are already marked, so they cannot.
+ */
+function PullPanel({
+  pull,
+  copied,
+  onClose,
+}: {
+  pull: ExtractionResult;
+  copied: boolean;
+  onClose: () => void;
+}) {
+  const [recopied, setRecopied] = useState(copied);
+
+  return (
+    <div className={`notice ${copied ? "info" : "warn"}`}>
+      <div className="row" style={{ alignItems: "center" }}>
+        <b>
+          {copied
+            ? `Copied ${pull.numbers.length} number(s) to the clipboard.`
+            : `The browser refused the clipboard. ${pull.numbers.length} number(s) below.`}
+        </b>
+        <span className="muted small">
+          {pull.marked} business(es) marked extracted
+          {pull.skipped_already_extracted > 0 &&
+            ` · ${pull.skipped_already_extracted} skipped as already extracted`}
+          {pull.remaining > 0 && ` · ${pull.remaining} still un-extracted below them`}
+        </span>
+        <span className="spacer" />
+        <button
+          onClick={async () => setRecopied(await copyToClipboard(pull.clipboard))}
+        >
+          {recopied ? "Copied ✓" : "Copy again"}
+        </button>
+        <Link href="/extracted">
+          <button>Extracted list</button>
+        </Link>
+        <button onClick={onClose}>Dismiss</button>
+      </div>
+
+      {/* §10.2's rule, restated for this screen: a short clipboard is explained,
+          never left for the operator to infer from a count that does not add up. */}
+      {pull.warnings.map((w) => (
+        <div key={w} className="small" style={{ marginTop: 6 }}>
+          {w}
+        </div>
+      ))}
+
+      <div className="log" style={{ marginTop: 8, maxHeight: 180 }}>
+        {pull.numbers.join("\n") || "No confirmed or likely numbers in this batch."}
+      </div>
+    </div>
   );
 }
 

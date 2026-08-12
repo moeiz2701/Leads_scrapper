@@ -1,3 +1,49 @@
+# The whole application: `docker compose up -d` and open http://localhost:3000.
+#
+# Five services, and the two that are easy to forget are the reason this file
+# exists in its current shape:
+#
+#   * **worker** — without it a created run sits at `queued` for ever, which
+#     looks like a hang rather than a missing process. It used to be a step in
+#     the README that you had to remember.
+#   * **migrate** — a one-shot `alembic upgrade head` that api and worker both
+#     wait on. Migrations run in exactly one place: two processes racing the
+#     same `alembic upgrade` on a cold volume is a lock error at boot.
+#
+# `.env` still drives everything tunable, but the three values that describe
+# *where* things are cannot come from it: `.env` says `localhost:5433` because
+# that is true from the host, and inside this network the same database is
+# `postgres:5432`. Those three are overridden per service below — environment
+# beats env_file, and both beat the `.env` file pydantic-settings would read.
+
+x-backend-env: &backend-env
+  # Service names, not localhost. The host mapping below is for psql and for
+  # running the scripts from a laptop; containers never use it.
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  # There is a worker in this file, so stages go to the queue. QUEUE_SYNC=true
+  # would run them inline in the API request instead — right for the tests,
+  # wrong here, where a 45-minute §6 social pass would be an HTTP timeout.
+  QUEUE_SYNC: "false"
+  # §7's archive, on the named volume mounted at /app/data.
+  RAW_ARCHIVE_DIR: /app/data/raw
+
+x-backend: &backend
+  build:
+    context: ./backend
+  image: leadscraper-backend:latest
+  env_file:
+    # Everything else — proxy (§7.1), SERP key, §7 pacing, dedupe thresholds.
+    # Optional so a fresh clone comes up on the defaults in `config.Settings`
+    # rather than failing on a file it has not been told to create yet.
+    - path: .env
+      required: false
+  volumes:
+    - ./backend/data:/app/data
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,7 +53,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leads}
       POSTGRES_DB: ${POSTGRES_DB:-leads}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # 5433 on the host, matching .env.example and the README. 5432 is
+      # routinely taken by a local Postgres or an Anaconda install.
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -29,6 +77,82 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  migrate:
+    <<: *backend
+    container_name: leads_migrate
+    environment: *backend-env
+    # One-shot. `restart: no` overrides the anchor: a migration that has already
+    # run should exit 0 and stay exited, not be restarted into a no-op loop.
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    container_name: leads_api
+    environment: *backend-env
+    command:
+      ["uvicorn", "leadscraper.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # /api/health reports whether anything will consume a run, which is the
+      # question the frontend actually depends on.
+      test:
+        ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    container_name: leads_worker
+    environment: *backend-env
+    # Every stage, one process — enough for the single operator §13 describes.
+    # Split with `--stage discovery` if a stuck Maps run starts blocking scoring.
+    command: ["python", "scripts/worker.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # A **build** arg, not just an environment variable. `rewrites()` runs
+        # during `next build` and its destination is frozen into
+        # `.next/routes-manifest.json`, which is what `next start` reads — so a
+        # runtime-only API_URL leaves the image proxying to the 127.0.0.1
+        # fallback and refusing connections to an API that is up. See
+        # frontend/Dockerfile.
+        API_URL: http://api:8000
+    image: leadscraper-frontend:latest
+    container_name: leads_frontend
+    environment:
+      # Kept as well, so `next dev` in this image and any future Next version
+      # that re-resolves rewrites at runtime both land on the same target.
+      API_URL: http://api:8000
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:

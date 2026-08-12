@@ -13,6 +13,8 @@ export type LeadRow = Record<string, unknown> & {
   lead_score: number | null;
   _business_id: string;
   _run_id: string;
+  /** On the extraction ledger. A decoration — never a filter (see services/results.py). */
+  _extracted: boolean;
 };
 
 export interface ResultsResponse {
@@ -130,6 +132,57 @@ export interface RunEstimate {
   caveats: string[];
 }
 
+/** The three sizes the Extract control offers — services/extraction.BATCH_SIZES. */
+export const BATCH_SIZES = [30, 50, 100] as const;
+export type BatchSize = (typeof BATCH_SIZES)[number];
+
+export interface ExtractedBusiness {
+  business_id: string;
+  run_id: string;
+  name: string;
+  city: string | null;
+  lead_score: number | null;
+  website: string | null;
+  numbers: string[];
+}
+
+/**
+ * One Extract click, and what it could not do.
+ *
+ * `clipboard` is built server-side so the "one number per line" format has a
+ * single definition with a test on it, rather than being re-decided here.
+ */
+export interface ExtractionResult {
+  batch_id: string | null;
+  clipboard: string;
+  numbers: string[];
+  businesses: ExtractedBusiness[];
+  requested: number;
+  marked: number;
+  skipped_already_extracted: number;
+  without_numbers: number;
+  remaining: number;
+  warnings: string[];
+}
+
+export interface ExtractionEntry {
+  id: string;
+  business_id: string;
+  run_id: string;
+  batch_id: string;
+  batch_size: number | null;
+  /** As sent, not as the business stands now — see services/extraction.py. */
+  numbers: string[];
+  extracted_at: string | null;
+  business_name: string | null;
+  city: string | null;
+  category: string | null;
+  website: string | null;
+  lead_score: number | null;
+  run_city: string | null;
+  run_category: string | null;
+}
+
 export interface SuppressionEntry {
   id: string;
   value_e164: string | null;
@@ -217,6 +270,35 @@ export const api = {
 
   results: (query: string) => request<ResultsResponse>(`/api/results?${query}`),
 
+  /**
+   * Extract the top N of the current view.
+   *
+   * `query` is the *same* string the table and the Export button use — the
+   * backend reads it through the one `result_query` dependency, so "extract
+   * whatever filter is applied" is guaranteed by construction. Only the batch
+   * size travels in the body.
+   */
+  extract: (query: string, limit: BatchSize) =>
+    request<ExtractionResult>(`/api/extractions?${query}`, {
+      method: "POST",
+      body: JSON.stringify({ limit }),
+    }),
+
+  extractions: (runIds: string[] = []) => {
+    const params = new URLSearchParams();
+    runIds.forEach((id) => params.append("run", id));
+    return request<ExtractionEntry[]>(`/api/extractions?${params.toString()}`);
+  },
+  clearExtraction: (id: string) =>
+    request<void>(`/api/extractions/${id}`, { method: "DELETE" }),
+  clearExtractions: (runIds: string[] = []) => {
+    const params = new URLSearchParams();
+    runIds.forEach((id) => params.append("run", id));
+    return request<{ cleared: number }>(`/api/extractions?${params.toString()}`, {
+      method: "DELETE",
+    });
+  },
+
   suppressions: () => request<SuppressionEntry[]>("/api/do-not-contact"),
   addSuppression: (body: unknown) =>
     request<SuppressionEntry>("/api/do-not-contact", {
@@ -249,6 +331,8 @@ export interface TableFilters {
   runIds: string[];
   whatsapp: string[];
   hasOwnerName: boolean | null;
+  /** Three states: `null` any, `true` a site is on record, `false` none is. */
+  hasWebsite: boolean | null;
   minScore: number | null;
   lineTypes: string[];
   sources: string[];
@@ -262,6 +346,7 @@ export const emptyFilters: TableFilters = {
   runIds: [],
   whatsapp: [],
   hasOwnerName: null,
+  hasWebsite: null,
   minScore: null,
   lineTypes: [],
   sources: [],
@@ -277,6 +362,7 @@ export function toQueryString(filters: TableFilters): string {
   if (filters.whatsapp.length) params.set("whatsapp", filters.whatsapp.join(","));
   if (filters.hasOwnerName !== null)
     params.set("has_owner_name", String(filters.hasOwnerName));
+  if (filters.hasWebsite !== null) params.set("has_website", String(filters.hasWebsite));
   if (filters.minScore !== null) params.set("min_score", String(filters.minScore));
   if (filters.lineTypes.length) params.set("line_type", filters.lineTypes.join(","));
   if (filters.sources.length) params.set("source", filters.sources.join(","));
@@ -285,6 +371,40 @@ export function toQueryString(filters: TableFilters): string {
   params.set("order", filters.descending ? "desc" : "asc");
   if (filters.collapse) params.set("collapse", "true");
   return params.toString();
+}
+
+/**
+ * Put text on the clipboard, and say whether it worked.
+ *
+ * `navigator.clipboard` needs a secure context and is refused by some browsers
+ * once an `await` has separated the write from the click that caused it — which
+ * is exactly this flow, because the numbers come back from a POST. The
+ * `execCommand` path is the fallback, and the boolean is the point: the caller
+ * has to be able to show the numbers on screen rather than claim a copy that
+ * never happened. Losing a pull to a silent clipboard failure would leave the
+ * businesses marked extracted with nothing to show for it.
+ */
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    /* fall through to the legacy path */
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -232,13 +232,48 @@ uv run python scripts/run_scoring.py --latest --preference whatsapp_only
 
 ## Running the app
 
-Three processes. The scripts above still work and are the quickest way to drive a
-single stage.
+**Everything, in one command.** `docker compose up -d` brings up the five
+long-running services — Postgres, Redis, the API, the queue worker and the UI —
+and runs the migrations on the way through a one-shot `migrate` service.
 
 ```bash
-docker compose up -d                                   # Postgres :5433 + Redis :6379
+cp .env.example .env          # optional; sensible defaults without it
+docker compose up -d          # then open http://localhost:3000
+docker compose logs -f worker # what the pipeline is doing
+docker compose down           # stop; the volumes survive
+```
+
+| | |
+|---|---|
+| http://localhost:3000 | the §13 screens |
+| http://localhost:8000/docs | the API |
+| `localhost:5433` | Postgres — note **5433**, not 5432 |
+
+Two things about that file are load-bearing. **`migrate` is a one-shot service**
+that `api` and `worker` both wait on (`service_completed_successfully`), because
+two processes racing the same `alembic upgrade` on a cold volume is a lock error
+at boot. And **the three "where things are" settings are overridden per service**
+rather than read from `.env`: `.env` correctly says `localhost:5433` because that
+is true from the host, and inside the compose network the same database is
+`postgres:5432`. Everything else — proxy, SERP key, §7 pacing, dedupe thresholds
+— still comes from `.env`, which is optional so a fresh clone comes up on
+`config.Settings` defaults.
+
+The backend image carries Chromium (~700 MB, and most of the first build). That
+is not optional: §5.1's discovery intercepts a Maps payload from a real browser,
+and §6.7 measured a plain fetch of a Facebook Page at HTTP 400. An image without
+one runs the API fine and fails two of the six stages.
+
+### Or run it from the shell
+
+Still the quickest way to iterate, and the `scripts/` above are the quickest way
+to drive a single stage.
+
+```bash
+docker compose up -d postgres redis                     # just the datastores
 
 cd backend
+uv run alembic upgrade head
 uv run uvicorn leadscraper.api.app:app --reload         # API      :8000
 uv run python scripts/worker.py                         # the queue consumer
 
@@ -252,15 +287,17 @@ Settings screen says so out loud when it happens. `QUEUE_SYNC=true` runs stages
 inline in the API instead, which is what the tests use.
 
 RQ's default worker forks per job and `os.fork` does not exist on Windows, so
-[worker.py](backend/scripts/worker.py) selects `SimpleWorker` there.
+[worker.py](backend/scripts/worker.py) selects `SimpleWorker` there. In the
+container it forks, because the container is Linux.
 
 ## Setup
 
-Requires Docker, and Python 3.12+ via [uv](https://docs.astral.sh/uv/).
+Docker alone is enough to *run* it. To develop, add Python 3.12+ via
+[uv](https://docs.astral.sh/uv/) and Node 22+.
 
 ```bash
-cp .env.example .env          # edit if ports 5433/6379 are taken
-docker compose up -d          # Postgres 16 + Redis 7
+cp .env.example .env          # edit if ports 5433/6379/8000/3000 are taken
+docker compose up -d postgres redis
 cd backend
 uv sync
 uv run alembic upgrade head
@@ -278,8 +315,9 @@ uv run playwright install chromium
 
 ```
 implementation.md            design doc — read this first
-docker-compose.yml           Postgres + Redis
+docker-compose.yml           postgres · redis · migrate · api · worker · frontend
 backend/
+  Dockerfile                 the backend image — API, worker and migrate share it
   config/
     cities.yaml              §3.1 cities + §5.1 commercial tiles
     synonyms.yaml            §4.2 query expansion — the highest-leverage config
@@ -314,6 +352,7 @@ backend/
       scoring.py             Stage 5 — normalise, score, rank
       dedupe.py              Stage 6 — the §10.1 cascade and merge
       results.py             the read side — §13 filters, §15 suppression, §10.1 union
+      extraction.py          the top-N pull and the ledger of what has been pulled
       estimates.py           §13 Screen 1's estimate, and what it refuses to say
     export/
       columns.py             §12.1's 41 columns, as data
@@ -322,7 +361,7 @@ backend/
     api/
       app.py                 the FastAPI app
       deps.py                the §13 filter bar, shared by table and export
-      routes/                runs · results · suppression · meta
+      routes/                runs · results · suppression · extraction · meta
     db/models.py             §11 schema
     pipeline/
       queues.py              §2 per-stage queues, enqueue, cancel
@@ -339,13 +378,99 @@ backend/
     worker.py                the queue consumer
   tests/
 frontend/                    §13's three screens + Settings (Next.js, TanStack)
+  Dockerfile                 multi-stage; runtime carries the build, not the toolchain
   app/
     page.tsx                 Screen 1 — new run, and the honest estimate
     runs/[id]/page.tsx       Screen 2 — progress, source pills, cancel
-    results/page.tsx         Screen 3 — the table, export, bulk delete
+    results/page.tsx         Screen 3 — the table, website split, Extract, export, delete
+    extracted/page.tsx       the extraction ledger — inspect, clear one, clear all
     settings/page.tsx        §13 Settings, read-only
   lib/api.ts                 the backend as types; one filter → one query string
 ```
+
+## Working a run: the website split and Extract
+
+Two controls on the results table that the design doc did not ask for, added
+because they are how the table is actually worked. Both are documented in §13
+Screen 3; the short version:
+
+**The website filter is three states — `any`, `has a website`, `no website on
+record`** — and it is a real split, not a cosmetic one. A business with a site is
+one §5.2 can raise to `confirmed`; a business without one is a business where
+§6's social pass is the only route to a `confirmed` label there will ever be, and
+§6.8 measured **97 businesses across the seven runs holding a social URL and no
+website at all**. A blank `website` counts as *no website*, so the two halves add
+back up to the run. The label says *on record* because nothing here proves the
+negative — it says no source published one.
+
+**Extract → top 30 / 50 / 100** copies every `confirmed` and `likely` number off
+the top of the current filtered, sorted view — one per line — and marks those
+businesses on an extraction ledger so the next pull moves past them. The
+[Extracted](frontend/app/extracted/page.tsx) screen shows what has gone out and
+clears one entry, one run's worth, or all of it.
+
+```
+GET  /api/results?run=…&has_website=false      the table, one half of the run
+POST /api/extractions?run=…&has_website=false  the same query, top N, marked
+GET  /api/extractions[?run=…]                  the ledger
+DELETE /api/extractions/{id} | ?run=…          clear one | clear a run | clear all
+```
+
+Five things it will not do, each an existing rule of the project applied one
+output further along:
+
+- **It never runs its own query.** The pull, the table and the CSV are one
+  `ResultQuery` through one `fetch_results`. §12.2 makes a CSV that disagrees
+  with the table a defect by definition; a clipboard that disagreed is the same
+  defect wearing a different button.
+- **It never takes a `no`.** `confirmed` and `likely` only, read from §9.3's
+  *label*. Nothing on this path touches the network — §9.3's rule about never
+  probing WhatsApp is untouched.
+- **It never stops at four numbers.** §12.1's 4 phone slots are a property of a
+  column set, and §10.1 forbids that becoming a property of the data.
+- **It never re-offers a row it passed over.** A business with no qualifying
+  number still counts toward the batch and is still marked — it was looked at
+  and found wanting, and the alternative is the same dead row on every pull for
+  ever. The count comes back as `without_numbers` and the screen says so, because
+  a clipboard shorter than the batch has to be explained rather than inferred.
+- **Marking is not §15.** `do_not_contact` says "never contact this"; the ledger
+  says "already sent". Clearing puts a business back in the queue and deletes
+  nothing else. The two lists are never read or written from each other's code.
+
+The mark decorates the row and never filters it — hiding extracted rows would
+shrink the CSV with them, and a business would vanish from an export because
+somebody once copied its number. The ledger stores the numbers **as sent**, not
+as they now stand: a later run raising a contact's §9.3 evidence must not
+rewrite the record of a message that has already gone out.
+
+### What both controls do on the seven live runs
+
+Measured across all 898 businesses, then the ledger cleared and the counts
+verified back to their prior state:
+
+| run | rows | has a site | no site | top 30 → numbers | 2nd top 30 → numbers |
+|---|---:|---:|---:|---:|---:|
+| Lahore × salon (×4) | 60 / 60 / 52 / 60 | 36 / 36 / 32 / 39 | 24 / 24 / 20 / 21 | 30 / 30 / 30 / 57 | 17 / 17 / 12 / 22 |
+| Karachi × salon | 39 | 15 | 24 | 24 | **0** |
+| Islamabad × salon | 199 | 68 | 131 | 53 | 37 |
+| Lahore × food | 428 | 238 | 190 | 68 | 63 |
+
+**The split is exhaustive on every run** — `has_website=true` plus
+`has_website=false` equals the unfiltered total on all seven, which is asserted
+rather than eyeballed. Website coverage is not uniform and is worth knowing
+before you filter: **34% on Islamabad × salon against 56% on Lahore × food.**
+
+**Yield decays as you go down the table, sharply.** The first 30 of Lahore ×
+salon are 30 businesses with 30 numbers and **0 without**; the second 30 are 17
+numbers and **13 without**. Karachi × salon's tail is worse — the second pull
+marked 9 businesses and produced **no numbers at all**. That is the ranking
+working (§3.3 puts the contactable rows first), and it is exactly why a business
+with no qualifying number still gets marked: without the ledger every pull after
+the first would re-serve that same dead tail.
+
+**And it corroborates §5.2 being the confirmation engine.** Filter Lahore × food
+to `whatsapp=confirmed` and 20 rows come back — **19 of them have a website and
+1 does not.**
 
 ## Things worth knowing before you change anything
 
@@ -486,6 +611,12 @@ Seven, all deliberate, all covered by a test that explains itself:
 former in v1 but §11's SQL omits it. Both got their first reader and first writer
 in Phase 5 — `source_state` had been empty since Phase 1 because
 `BreakerRegistry` is in-process and dies with the worker.
+
+`extractions` is a third table §11 does not list, added for §13 Screen 3's
+Extract control (migration `c7f1a4be2d19`). It is not a departure so much as an
+addition: nothing in the doc contradicts it, and §13 now describes it. Worth
+saying once, loudly — **it is a working queue, not a compliance record.**
+`do_not_contact` remains the only table that makes a removal stick.
 
 ## What a run produces, end to end
 

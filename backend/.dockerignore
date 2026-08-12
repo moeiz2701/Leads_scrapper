@@ -1,0 +1,20 @@
+# The local virtualenv is Windows-built and would shadow /opt/venv.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# §7's raw archive is gigabytes of stored bodies and is mounted as a volume,
+# not baked in. Copying it would make every image build re-send the cache.
+data/
+
+# Never bake secrets into a layer — compose passes these as environment.
+.env
+.env.local

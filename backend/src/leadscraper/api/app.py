@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from leadscraper.api.routes import meta, results, runs, suppression
+from leadscraper.api.routes import extraction, meta, results, runs, suppression
 from leadscraper.config import get_settings
 from leadscraper.logging import configure_logging, get_logger
 from leadscraper.pipeline.queues import queue_health
@@ -78,6 +78,7 @@ app.add_middleware(
 app.include_router(runs.router)
 app.include_router(results.router)
 app.include_router(suppression.router)
+app.include_router(extraction.router)
 app.include_router(meta.router)
 
 

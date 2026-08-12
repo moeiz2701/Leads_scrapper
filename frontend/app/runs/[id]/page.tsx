@@ -114,6 +114,19 @@ export default function RunProgressScreen({
         <Link href={`/results?run=${run.id}`}>
           <button className="primary">Open results table</button>
         </Link>
+        {/* This run's businesses, pre-filtered to the two halves worth working
+            separately. The Extract button and the website filter live on that
+            screen because that is where the filter bar is, and a pull is
+            defined as "the top N of what is filtered". */}
+        <Link href={`/results?run=${run.id}&website=yes`}>
+          <button>With a website</button>
+        </Link>
+        <Link href={`/results?run=${run.id}&website=no`}>
+          <button>No website</button>
+        </Link>
+        <Link href="/extracted">
+          <button>Extracted list</button>
+        </Link>
         <button onClick={refresh} disabled={busy}>
           Refresh
         </button>

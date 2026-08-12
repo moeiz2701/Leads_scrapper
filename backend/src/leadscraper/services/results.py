@@ -1,11 +1,14 @@
-"""The read side: §13 Screen 3's table and §12.2's CSV, from one query.
+"""The read side: §13 Screen 3's table, §12.2's CSV and extraction, from one query.
 
 **This module exists so the table and the export cannot disagree.** §12.2 says
 the CSV must "respect the active table filters and sort order", which makes any
 divergence between the two a defect by definition — so there is one filter type,
-one sort, one suppression check, and both endpoints call ``fetch_results``.
+one sort, one suppression check, and every reader calls ``fetch_results``.
+Extraction joined that list rather than growing a query of its own: "extract the
+top 30 of what I am looking at" is the same sentence §12.2 says about the CSV,
+and a second query layer is how it would come to mean something else.
 
-Three things happen here that are not in the §11 schema:
+Four things happen here that are not in the §11 schema:
 
 * **§15 suppression.** ``do_not_contact`` is consulted on every read, not just on
   export. §15 says "checked at export time", and that is the *minimum*: a
@@ -18,6 +21,9 @@ Three things happen here that are not in the §11 schema:
 * **The §13 contact-level filters.** WhatsApp status, phone type and source are
   properties of a *contact*, but a row is a *business*, so each is read as "has a
   visible, ranked number matching this".
+* **The extraction mark.** Every row carries ``_extracted``, read from the
+  ledger in ``extractions``. It is a decoration, never a filter applied here —
+  hiding an extracted row would silently shrink the table and the CSV with it.
 
 Filtering below the run level happens in Python rather than SQL. That is a
 deliberate trade: the contact-level predicates are defined over the *exported*
@@ -36,11 +42,11 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from leadscraper.core.textnorm import registrable_domain
-from leadscraper.db.models import Business, Contact, DoNotContact, Run
+from leadscraper.db.models import Business, Contact, DoNotContact, Extraction, Run
 from leadscraper.enums import ContactKind
 from leadscraper.export.rows import build_row
 
@@ -69,6 +75,12 @@ class ResultQuery:
     run_ids: tuple[uuid.UUID, ...] = ()
     whatsapp: tuple[str, ...] = ()
     has_owner_name: bool | None = None
+    # Three states, not two. ``None`` is "any"; ``True`` and ``False`` are the
+    # two halves of the run the operator wants to work separately — a business
+    # with a site is the one §5.2 can confirm a WhatsApp number on, and a
+    # business without one is the one where §6's social pass is the only route
+    # to a `confirmed` label that will ever exist.
+    has_website: bool | None = None
     min_score: int | None = None
     line_types: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
@@ -81,10 +93,29 @@ class ResultQuery:
 
 
 @dataclass(slots=True)
+class ResultEntry:
+    """One visible business: its §12.1 row, and the records behind that row.
+
+    The row alone is a projection — §12.1 caps at 4 phone slots and exports
+    labels rather than contacts. Callers that need the underlying contacts
+    (extraction does, because "every confirmed and likely number" is not
+    something the 4 slots can express) must not re-query them, or they would be
+    reading a *different* contact set from the one the table applied §15
+    suppression and the §13 filters to. So the query carries both.
+    """
+
+    row: dict[str, Any]
+    business: Business
+    contacts: list[Contact]
+
+
+@dataclass(slots=True)
 class ResultPage:
     """Rows plus the counts the UI needs to be honest about what it hid."""
 
     rows: list[dict[str, Any]] = field(default_factory=list)
+    # ``rows[i]`` is ``entries[i].row`` — the same objects, not copies.
+    entries: list[ResultEntry] = field(default_factory=list)
     total: int = 0
     # §15 — reported rather than silently applied. An operator looking at 44 rows
     # where a colleague saw 45 needs to know a suppression did that.
@@ -136,10 +167,23 @@ def load_suppression(session: Session) -> Suppression:
     )
 
 
+def load_extracted_ids(session: Session) -> frozenset[uuid.UUID]:
+    """Which businesses are already on the extraction ledger.
+
+    Read on every query rather than joined, for the same reason suppression is:
+    it decorates every row, and one small set beats a join that has to be
+    repeated in the export path.
+    """
+    return frozenset(
+        session.execute(select(Extraction.business_id)).scalars().all()
+    )
+
+
 def fetch_results(session: Session, query: ResultQuery) -> ResultPage:
-    """The one read path. Both §13 Screen 3 and §12.2 call this."""
+    """The one read path. §13 Screen 3, §12.2's CSV and extraction all call this."""
     page = ResultPage()
     suppression = load_suppression(session)
+    extracted = load_extracted_ids(session)
 
     businesses = _select_businesses(session, query)
     visible: list[tuple[Business, list[Contact]]] = []
@@ -166,7 +210,7 @@ def fetch_results(session: Session, query: ResultQuery) -> ResultPage:
 
         visible.append((business, contacts))
 
-    rows: list[dict[str, Any]] = []
+    entries: list[ResultEntry] = []
     for business, contacts in visible:
         if not _matches_contact_filters(contacts, query):
             continue
@@ -176,21 +220,25 @@ def fetch_results(session: Session, query: ResultQuery) -> ResultPage:
         row["_business_id"] = str(business.id)
         row["_run_id"] = str(business.run_id)
         row["_place_id"] = business.place_id
-        rows.append(row)
+        row["_extracted"] = business.id in extracted
+        entries.append(ResultEntry(row=row, business=business, contacts=contacts))
 
     if query.collapse_place_id:
-        before = len(rows)
-        rows = _collapse_on_place_id(rows)
-        page.collapsed = before - len(rows)
+        before = len(entries)
+        entries = _collapse_on_place_id(entries)
+        page.collapsed = before - len(entries)
 
-    rows.sort(key=_sort_key(query.sort, query.descending), reverse=query.descending)
+    sort_key = _sort_key(query.sort, query.descending)
+    entries.sort(key=lambda entry: sort_key(entry.row), reverse=query.descending)
 
-    page.total = len(rows)
-    page.cities = _distinct(rows, "city")
-    page.categories = _distinct(rows, "category")
+    page.total = len(entries)
+    ordered_rows = [entry.row for entry in entries]
+    page.cities = _distinct(ordered_rows, "city")
+    page.categories = _distinct(ordered_rows, "category")
 
     start = max(query.offset, 0)
-    page.rows = rows[start : start + query.limit] if query.limit else rows[start:]
+    page.entries = entries[start : start + query.limit] if query.limit else entries[start:]
+    page.rows = [entry.row for entry in page.entries]
     return page
 
 
@@ -203,6 +251,19 @@ def _select_businesses(session: Session, query: ResultQuery) -> Sequence[Busines
     statement = select(Business).options(selectinload(Business.contacts))
     if query.run_ids:
         statement = statement.where(Business.run_id.in_(query.run_ids))
+    if query.has_website is not None:
+        # An empty string counts as no website, not as one. `website` is
+        # gap-filled from several places — §5.1's Maps payload, §6.4's bio link —
+        # and a blank that survived one of those is the absence of a site, which
+        # is what the operator asked to split the table on.
+        #
+        # The honest reading of `has_website=False` is "no website *on record*",
+        # not "this business has no website". Nothing here proves the negative;
+        # it says our sources never published one, which is the §10.2 "missing is
+        # not zero" rule stated for a filter rather than for a score. The UI
+        # labels it that way.
+        no_site = or_(Business.website.is_(None), Business.website == "")
+        statement = statement.where(~no_site if query.has_website else no_site)
     if query.min_score is not None:
         # NULL is excluded here on purpose: an unscored business has not failed
         # the bar, it has not been measured against it. Asking for "score ≥ 60"
@@ -301,7 +362,7 @@ def _national_digits(value: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _collapse_on_place_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collapse_on_place_id(entries: list[ResultEntry]) -> list[ResultEntry]:
     """One table from many runs, non-destructively (§10.1's Phase 5 note).
 
     The four Lahore × salon runs hold 232 ``place_id`` values that are 72 real
@@ -315,17 +376,17 @@ def _collapse_on_place_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     A business with no ``place_id`` cannot be matched this way and is always
     kept: dropping it would be a merge asserted on no evidence.
     """
-    best: dict[str, dict[str, Any]] = {}
-    out: list[dict[str, Any]] = []
+    best: dict[str, ResultEntry] = {}
+    out: list[ResultEntry] = []
 
-    for row in rows:
-        place_id = row.get("_place_id")
+    for entry in entries:
+        place_id = entry.row.get("_place_id")
         if not place_id:
-            out.append(row)
+            out.append(entry)
             continue
         incumbent = best.get(place_id)
-        if incumbent is None or _collapse_key(row) > _collapse_key(incumbent):
-            best[place_id] = row
+        if incumbent is None or _collapse_key(entry.row) > _collapse_key(incumbent.row):
+            best[place_id] = entry
 
     out.extend(best.values())
     return out

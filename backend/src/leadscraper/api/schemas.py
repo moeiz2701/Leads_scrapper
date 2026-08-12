@@ -137,6 +137,69 @@ class ResultsResponse(BaseModel):
     categories: list[str] = Field(default_factory=list)
 
 
+class ExtractionRequest(BaseModel):
+    """Extract → top N of the current view.
+
+    The *filters* are not in this body — they arrive as the query string, read by
+    the same ``result_query`` dependency the table and the CSV use. That is the
+    point: "extract what I am looking at" and "export what I am looking at" have
+    to mean the same thing, and they cannot if one of them re-declares the
+    filter set here.
+    """
+
+    limit: int = Field(description="30, 50 or 100 — services.extraction.BATCH_SIZES")
+
+
+class ExtractedBusinessOut(BaseModel):
+    business_id: uuid.UUID
+    run_id: uuid.UUID
+    name: str
+    city: str | None = None
+    lead_score: int | None = None
+    website: str | None = None
+    numbers: list[str] = Field(default_factory=list)
+
+
+class ExtractionResponse(BaseModel):
+    """What one Extract click produced, and what it could not."""
+
+    batch_id: uuid.UUID | None = None
+    # The clipboard payload, built server-side so its format has one definition
+    # and a test can pin it.
+    clipboard: str = ""
+    numbers: list[str] = Field(default_factory=list)
+    businesses: list[ExtractedBusinessOut] = Field(default_factory=list)
+    requested: int = 0
+    marked: int = 0
+    skipped_already_extracted: int = 0
+    without_numbers: int = 0
+    remaining: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ExtractionEntry(BaseModel):
+    """One row of the extracted list."""
+
+    id: uuid.UUID
+    business_id: uuid.UUID
+    run_id: uuid.UUID
+    batch_id: uuid.UUID
+    batch_size: int | None = None
+    numbers: list[str] = Field(default_factory=list)
+    extracted_at: datetime | None = None
+    business_name: str | None = None
+    city: str | None = None
+    category: str | None = None
+    website: str | None = None
+    lead_score: int | None = None
+    run_city: str | None = None
+    run_category: str | None = None
+
+
+class ExtractionCleared(BaseModel):
+    cleared: int
+
+
 class SuppressionCreate(BaseModel):
     """§15 — a removal request. At least one identifier is required."""
 

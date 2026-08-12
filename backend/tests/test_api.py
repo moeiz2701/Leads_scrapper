@@ -455,3 +455,96 @@ def test_a_suppressed_number_disappears_from_the_table_and_the_export(
     assert table["total"] == 0
     assert table["suppressed_businesses"] == 1
     assert export.headers["X-Leads-Suppressed-Businesses"] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# Extraction
+# --------------------------------------------------------------------------- #
+
+
+@requires_db
+def test_extract_takes_its_filters_from_the_query_string(
+    client: TestClient, db_session: Session
+):
+    """The filters are not in the POST body, and that is the design.
+
+    §12.2 makes the CSV diverging from the table a defect by definition. The
+    clipboard is a third rendering of the same query, so it reads the same
+    ``result_query`` dependency — a body that re-declared the filter set would be
+    a second place for them to drift.
+    """
+    run = _seed(db_session, website="https://paragon.pk")
+    _seed(db_session, city="Lahore")
+
+    body = client.post(
+        "/api/extractions", params={"run": str(run.id), "has_website": "true"}, json={"limit": 30}
+    ).json()
+
+    assert body["marked"] == 1
+    assert body["businesses"][0]["name"] == "Paragon Salon"
+    assert body["clipboard"] == "\n".join(body["numbers"])
+
+
+@requires_db
+def test_extract_refuses_a_batch_size_it_does_not_offer(
+    client: TestClient, db_session: Session
+):
+    """Clamping a mis-typed size would empty the queue instead of refusing."""
+    run = _seed(db_session)
+    response = client.post(
+        "/api/extractions", params={"run": str(run.id)}, json={"limit": 500}
+    )
+    assert response.status_code == 422
+
+
+@requires_db
+def test_the_extracted_list_survives_and_can_be_cleared(
+    client: TestClient, db_session: Session
+):
+    run = _seed(db_session)
+    client.post("/api/extractions", params={"run": str(run.id)}, json={"limit": 30})
+
+    listed = client.get("/api/extractions").json()
+    assert len(listed) == 1
+    assert listed[0]["business_name"] == "Paragon Salon"
+
+    assert client.delete(f"/api/extractions/{listed[0]['id']}").status_code == 204
+    assert client.get("/api/extractions").json() == []
+
+    # And the business is offered again, because clearing is not suppression.
+    again = client.post(
+        "/api/extractions", params={"run": str(run.id)}, json={"limit": 30}
+    ).json()
+    assert again["marked"] == 1
+
+
+@requires_db
+def test_clearing_the_ledger_leaves_the_results_table_intact(
+    client: TestClient, db_session: Session
+):
+    """Clearing retracts "already sent" and nothing else — no row, no §15 entry."""
+    run = _seed(db_session)
+    client.post("/api/extractions", params={"run": str(run.id)}, json={"limit": 30})
+
+    assert client.delete("/api/extractions").json()["cleared"] == 1
+    assert client.get("/api/results", params={"run": str(run.id)}).json()["total"] == 1
+    assert client.get("/api/do-not-contact").json() == []
+
+
+@requires_db
+def test_the_website_filter_splits_a_run_without_losing_a_row(
+    client: TestClient, db_session: Session
+):
+    """§13's two halves of a run have to add back up to the run."""
+    run = _seed(db_session, website="https://paragon.pk")
+    with_site = client.get(
+        "/api/results", params={"run": str(run.id), "has_website": "true"}
+    ).json()
+    without_site = client.get(
+        "/api/results", params={"run": str(run.id), "has_website": "false"}
+    ).json()
+    everything = client.get("/api/results", params={"run": str(run.id)}).json()
+
+    assert with_site["total"] == 1
+    assert without_site["total"] == 0
+    assert with_site["total"] + without_site["total"] == everything["total"]

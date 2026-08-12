@@ -140,6 +140,51 @@ class Contact(Base):
     business: Mapped[Business] = relationship(back_populates="contacts")
 
 
+class Extraction(Base, TimestampMixin):
+    """The extraction ledger — which businesses have already been pulled for outreach.
+
+    Not in §11, and not a compliance record: ``do_not_contact`` is that, and it is
+    a different statement. This one answers "have I already handed these numbers
+    to whoever does the messaging?", so that Extract → *top 30* twice in a row
+    gives 60 distinct businesses rather than the same 30 again.
+
+    ``numbers`` is the batch as it was actually copied, not a live view of the
+    business's contacts. The two diverge the moment a later run adds evidence,
+    and the operator needs the historical answer — "what did I send out?" — not
+    the current one.
+    """
+
+    __tablename__ = "extractions"
+    __table_args__ = (
+        Index("ix_extractions_run_id", "run_id"),
+        Index("ix_extractions_batch_id", "batch_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # Unique: a business is extracted or it is not. Re-extracting the same row
+    # is the thing this table exists to prevent, so the database says so rather
+    # than the service remembering to check.
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    # Denormalised from the business so the list can be scoped to a run without
+    # a join, and so a per-run "clear all" is one statement.
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    # One Extract click. Lets the list group a pull the operator remembers making.
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    batch_size: Mapped[int | None] = mapped_column(Integer)
+    numbers: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    extracted_at: Mapped[datetime | None] = mapped_column()
+
+    business: Mapped[Business] = relationship()
+    run: Mapped[Run] = relationship()
+
+
 class RawFetch(Base):
     """§7 raw archive index. Bodies live on disk; this table is the manifest."""
 

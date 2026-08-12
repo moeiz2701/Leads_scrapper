@@ -278,6 +278,38 @@ def test_free_text_search_matches_names_case_insensitively(db_session: Session):
     assert [r["business_name"] for r in page.rows] == ["Paragon Salon"]
 
 
+@requires_db
+def test_has_website_splits_the_run_into_two_halves_that_add_back_up(
+    db_session: Session,
+):
+    """Three states, and no row falls between them.
+
+    The two halves are different work: a business with a site is one §5.2 can
+    confirm a WhatsApp number on, and one without is a business where §6's social
+    pass is the only route to a `confirmed` label there will ever be. So the
+    partition has to be exhaustive — a row visible under neither setting would be
+    a lead the operator never sees while believing they have looked at both.
+    """
+    run = _run(db_session)
+    _phone(db_session, _business(db_session, run, name="Has One", website="https://a.pk"))
+    _phone(db_session, _business(db_session, run, name="Has None", website=None))
+    _phone(db_session, _business(db_session, run, name="Blank", website=""))
+
+    def names(has_website: bool | None) -> list[str]:
+        page = fetch_results(
+            db_session, ResultQuery(run_ids=(run.id,), has_website=has_website)
+        )
+        return sorted(r["business_name"] for r in page.rows)
+
+    assert names(True) == ["Has One"]
+    # An empty string is the absence of a website, not a website. `website` is
+    # gap-filled from §5.1's payload and §6.4's bio link, and a blank surviving
+    # one of those must not land in the "has a site" half.
+    assert names(False) == ["Blank", "Has None"]
+    assert names(None) == ["Blank", "Has None", "Has One"]
+    assert sorted(names(True) + names(False)) == names(None)
+
+
 # --------------------------------------------------------------------------- #
 # Sorting
 # --------------------------------------------------------------------------- #

@@ -48,6 +48,10 @@ def result_query(
     run: Annotated[list[uuid.UUID] | None, Query(description="repeatable")] = None,
     whatsapp: Annotated[str | None, Query(description="confirmed,likely,no")] = None,
     has_owner_name: Annotated[bool | None, Query()] = None,
+    has_website: Annotated[
+        bool | None,
+        Query(description="true = a website is on record, false = none is, omitted = any"),
+    ] = None,
     min_score: Annotated[int | None, Query(ge=0, le=100)] = None,
     line_type: Annotated[str | None, Query(description="mobile,landline,uan")] = None,
     source: Annotated[str | None, Query()] = None,
@@ -62,6 +66,7 @@ def result_query(
         run_ids=tuple(run or ()),
         whatsapp=_split(whatsapp),
         has_owner_name=has_owner_name,
+        has_website=has_website,
         min_score=min_score,
         line_types=_split(line_type),
         sources=_split(source),
